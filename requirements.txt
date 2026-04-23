@@ -1,0 +1,14 @@
+duckdb
+pandas
+numpy
+networkx
+plotly
+searoute
+geopandas
+shapely
+global-land-mask
+openpyxl
+fastapi
+uvicorn
+httpx
+python-multipart

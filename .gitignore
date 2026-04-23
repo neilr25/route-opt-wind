@@ -1,0 +1,43 @@
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# Large data files
+*.parquet
+*.db
+*.duckdb
+
+# Analysis outputs
+*.html
+output/
+analysis/
+*.log
+server*.log
+server_err*.log
+server_out*.log
+
+# Local dev
+.sisyphus/
+temp_debug.py
+*.tmp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test scripts we don't need to keep
+debug_*.py
+check_*.py
+profile_*.py
+test_*.py
+summarise_results.py
+start_server.py
+report.py
+
+# Config with secrets
+.env
