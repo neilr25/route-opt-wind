@@ -1,0 +1,356 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SGS Route Optimiser</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<style>
+html{box-sizing:border-box}*,::after,::before{box-sizing:inherit}
+body{font-family:system-ui,-apple-system,sans-serif;max-width:1100px;margin:0 auto;padding:20px;background:#f5f6f8;color:#1a1a1a;line-height:1.4}
+h1{margin-bottom:6px}
+p.subtitle{color:#666;margin-top:0;margin-bottom:20px}
+button{background:#0052cc;color:#fff;border:none;padding:10px 18px;border-radius:6px;font-size:14px;cursor:pointer}
+button.secondary{background:#e3eafc;color:#0052cc;border:1px solid #b3d3ff}
+button:disabled{opacity:.5;cursor:not-allowed}
+input[type=date],input[type=number],input[type=text],select{box-sizing:border-box;padding:8px 10px;border:1px solid #ccc;border-radius:6px;font-size:14px;min-width:130px}
+.row{display:flex;gap:12px;flex-wrap:wrap;margin:8px 0;align-items:flex-end}
+.row label{display:block;font-size:12px;color:#666;margin-bottom:4px;font-weight:500}
+.panel{background:#fff;border:1px solid #ddd;border-radius:8px;padding:16px;margin-top:14px}
+.panel h3{margin:0 0 10px 0;font-size:14px;text-transform:uppercase;letter-spacing:.5px;color:#444}
+.results table{border-collapse:collapse;width:100%;font-size:13px}
+.results td,.results th{text-align:left;padding:6px 8px;border-bottom:1px solid #eee}
+.results th{color:#666;font-weight:600;font-size:11px;text-transform:uppercase;background:#fafafa}
+.results tr:last-child td{border-bottom:none}
+.results .num{text-align:right;font-variant-numeric:tabular-nums}
+.stats-bar{display:flex;gap:16px;flex-wrap:wrap;margin-top:8px}
+.stat-card{flex:1 1 140px;background:#f0f6ff;border:1px solid #dbe9ff;border-radius:6px;padding:10px 14px;text-align:center;min-width:120px}
+.stat-card .val{font-size:18px;font-weight:700;color:#0052cc}
+.stat-card .lbl{font-size:11px;color:#666;margin-top:4px;text-transform:uppercase}
+.stat-card.red{background:#fff0ef;border-color:#ffdbd9}
+.stat-card.red .val{color:#ef553b}
+.stat-card.green{background:#eafff7;border-color:#c6f5e6}
+.stat-card.green .val{color:#00cc96}
+#map{min-height:480px;background:#fff;border:1px solid #ddd;border-radius:8px;margin-top:12px}
+.layer-toggles{display:flex;gap:14px;flex-wrap:wrap;margin-top:8px;align-items:center}
+.layer-toggles label{font-size:13px;cursor:pointer;display:flex;align-items:center;gap:5px}
+.error{color:#c00;background:#ffeaea;padding:10px 14px;border-radius:6px;margin-top:10px;font-size:13px}
+#batchProgressWrap{display:none;margin-top:10px}
+#batchProgressWrap .track{background:#e3eafc;border-radius:4px;height:14px;overflow:hidden}
+#batchProgressWrap .bar{background:#0052cc;height:100%;width:0%;transition:width .3s;border-radius:4px}
+#batchProgressWrap .info{font-size:12px;color:#555;margin-top:6px}
+.green{color:#00cc96}.red{color:#ef553b}
+</style>
+</head>
+<body>
+<h1>🧭 SGS Route Optimiser</h1>
+<p class="subtitle">Wind-aware shipping route optimiser · Powered by ERA5 · ~0.03s per day with weather pre-load</p>
+
+<!-- Inputs -->
+<div class="panel">
+<div class="row">
+<div><label for="start">Start (port or lat,lon)</label><input id="start" value="ROTTERDAM" placeholder="ROTTERDAM"></div>
+<div><label for="end">End (port or lat,lon)</label><input id="end" value="NEW YORK" placeholder="NEW YORK"></div>
+<div><label for="date">Date</label><input id="date" type="date" value="2025-06-01"></div>
+<div><label for="speed">Speed (kts)</label><input id="speed" type="number" value="12" min="1" max="25" style="width:80px"></div>
+<div><label for="maxDetour">Max detour %</label><input id="maxDetour" type="number" value="" min="0" max="50" step="1" placeholder="None" style="width:80px"></div>
+<div><br><button id="go" onclick="run()">Analyse</button></div>
+</div>
+
+<!-- Batch panel -->
+<div style="margin-top:12px;padding-top:12px;border-top:1px solid #eee">
+<div class="row">
+<div><label for="batchStart">Batch start date</label><input id="batchStart" type="date" value="2025-01-01"></div>
+<div><label for="batchEnd">Batch end date</label><input id="batchEnd" type="date" value="2025-12-31"></div>
+<div><br><button id="batchGo" class="secondary" onclick="batchRun()">Batch Run</button></div>
+</div>
+<div id="batchProgressWrap">
+<div class="track"><div id="batchBar" class="bar"></div></div>
+<div class="info"><span id="batchText"></span> <span id="batchEta"></span></div>
+</div>
+</div>
+</div>
+
+<!-- Layer toggles -->
+<div class="panel">
+<div class="layer-toggles">
+<label><input type="checkbox" id="layerBase" checked> Baseline route</label>
+<label><input type="checkbox" id="layerOpt" checked> Optimised route</label>
+<label><input type="checkbox" id="layerMeshEdges"> Mesh edges</label>
+<label><input type="checkbox" id="layerMeshNodes"> Mesh nodes</label>
+</div>
+</div>
+
+<div id="loading" style="display:none;padding:16px;background:#e3f2fd;border:1px solid #90caf9;border-radius:8px;margin-top:12px;text-align:center">
+<p style="margin:0"><strong>Calculating route…</strong></p>
+    <p style="margin:4px 0 0 0;color:#555;">Pre-loading weather data first time (~15s), then ~0.03s per day.</p>
+</div>
+
+<div id="err"></div>
+
+<!-- Stats panel -->
+<div id="statsPanel" class="panel" style="display:none">
+<div id="statsBar" class="stats-bar"></div>
+</div>
+
+<!-- Results -->
+<div id="results"></div>
+
+<div id="map"></div>
+
+<script>
+    const $ = id => document.getElementById(id);
+    let _map = null;
+    let _layers = {};
+
+    async function run() {
+        $('go').disabled = true;
+        $('loading').style.display = 'block';
+        $('err').innerHTML = '';
+        $('results').innerHTML = '';
+        $('map').innerHTML = '';
+        if (_map) { _map.remove(); _map = null; }
+        $('statsPanel').style.display = 'none';
+
+        const start = $('start').value.trim();
+        const end = $('end').value.trim();
+        const date = $('date').value;
+        const speed = $('speed').value;
+        const maxDetour = $('maxDetour').value;
+
+        try {
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 120000);
+            let url = `/optimize?start=${encodeURIComponent(start)}&end=${encodeURIComponent(end)}&voyage_date=${date}&speed=${speed}`;
+            if (maxDetour) url += `&max_detour_pct=${encodeURIComponent(maxDetour)}`;
+            const r = await fetch(url, { signal: controller.signal });
+            clearTimeout(timeoutId);
+
+            const data = await r.json();
+            if (!r.ok) throw new Error(data.detail || 'Request failed');
+
+            // Distance metrics
+            const baseDist = data.baseline_distance_nm;
+            const optDist = data.optimised_distance_nm;
+            const detourPct = data.detour_pct;
+            const detourHours = data.detour_hours;
+            const baseHours = data.baseline_hours;
+            const optHours = data.optimised_hours;
+
+            // Stats bar
+            const detourSign = detourPct > 0 ? '+' : '';
+            $('statsBar').innerHTML = `
+                <div class="stat-card red"><div class="val">${baseDist.toLocaleString()} nm</div><div class="lbl">Baseline</div></div>
+                <div class="stat-card"><div class="val">${optDist.toLocaleString()} nm</div><div class="lbl">Optimised</div></div>
+                <div class="stat-card"><div class="val">${detourSign}${detourPct}%</div><div class="lbl">Detour</div></div>
+                <div class="stat-card"><div class="val">${detourSign}${detourHours} h</div><div class="lbl">Extra time</div></div>`;
+            $('statsPanel').style.display = '';
+
+            // Results table
+            $('results').innerHTML = `
+                <div class="results panel">
+                    <h3>Fuel results</h3>
+                    <table>
+                        <tr><th>Metric</th><th class="num">Value</th></tr>
+                        <tr><td>Standard (no wind)</td><td class="num red">${data.standard_no_wind_tonnes} t</td></tr>
+                        <tr><td>Standard (with wind)</td><td class="num">${data.standard_with_wind_tonnes} t</td></tr>
+                        <tr><td>Optimised (with wind)</td><td class="num green"><strong>${data.optimised_with_wind_tonnes} t</strong></td></tr>
+                        <tr><td>Wind savings</td><td class="num">${(data.standard_no_wind_tonnes - data.standard_with_wind_tonnes).toFixed(2)} t</td></tr>
+                        <tr><td>Optimisation extra savings</td><td class="num green"><strong>${(data.standard_with_wind_tonnes - data.optimised_with_wind_tonnes).toFixed(2)} t</strong></td></tr>
+                        <tr><td>Baseline distance</td><td class="num">${baseDist} nm</td></tr>
+                        <tr><td>Optimised distance</td><td class="num">${optDist} nm</td></tr>
+                        <tr><td>Detour %</td><td class="num">${detourPct}%</td></tr>
+                        <tr><td>Detour hours</td><td class="num">${detourHours} h</td></tr>
+                        <tr><td>Baseline hours</td><td class="num">${baseHours} h</td></tr>
+                        <tr><td>Optimised hours</td><td class="num">${optHours} h</td></tr>
+                    </table>
+                </div>`;
+
+            // Map
+            _map = L.map('map');
+            L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+                attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+            }).addTo(_map);
+
+            _layers = {};
+
+            if (data.baseline_route && data.baseline_route.length > 1) {
+                const baseLine = data.baseline_route.map(p => [p[0], p[1]]);
+                _layers.base = L.polyline(baseLine, {color: '#EF553B', weight: 3, opacity: 0.8}).addTo(_map).bindPopup('Baseline route');
+            }
+            if (data.optimised_route && data.optimised_route.length > 1) {
+                const optLine = data.optimised_route.map(p => [p[0], p[1]]);
+                _layers.opt = L.polyline(optLine, {color: '#00CC96', weight: 4, opacity: 0.9}).addTo(_map).bindPopup('Optimised route');
+            }
+
+            // Mesh overlay
+            if (data.mesh) {
+                const meshNodes = data.mesh.nodes || [];
+                const meshEdges = data.mesh.edges || [];
+
+                const nodeMap = {};
+                meshNodes.forEach(n => { nodeMap[n.id[0] + ',' + n.id[1]] = n; });
+
+                _layers.meshEdges = L.layerGroup().addTo(_map);
+                meshEdges.forEach(e => {
+                    const key = e.u[0] + ',' + e.u[1];
+                    const vkey = e.v[0] + ',' + e.v[1];
+                    const u = nodeMap[key];
+                    const v = nodeMap[vkey];
+                    if (!u || !v) return;
+                    const line = [[u.lat, u.lon], [v.lat, v.lon]];
+                    const popupContent = `Stage ${u.stage_idx} (lane ${u.lane_idx}) → Stage ${v.stage_idx} (lane ${v.lane_idx})<br>` +
+                        `Bearing: ${e.bearing}° | Distance: ${e.distance_nm} nm<br>` +
+                        `Crosses land: ${e.crosses_land ? '<strong style="color:red">YES</strong>' : 'No'}<br>` +
+                        `Start: ${u.lat.toFixed(4)}, ${u.lon.toFixed(4)}<br>` +
+                        `End: ${v.lat.toFixed(4)}, ${v.lon.toFixed(4)}`;
+                    const pl = L.polyline(line, {color: e.crosses_land ? 'red' : '#999', weight: e.crosses_land ? 2 : 0.5, opacity: 0.8})
+                     .bindTooltip(popupContent, {sticky: true});
+                    _layers.meshEdges.addLayer(pl);
+                });
+                if (!$('layerMeshEdges').checked) _map.removeLayer(_layers.meshEdges);
+
+                _layers.meshNodes = L.layerGroup().addTo(_map);
+                meshNodes.forEach(n => {
+                    const cm = L.circleMarker([n.lat, n.lon], {
+                        radius: n.is_land ? 4 : 2,
+                        color: n.is_land ? 'red' : '#666',
+                        fillColor: n.is_land ? 'red' : '#666',
+                        fillOpacity: 0.6,
+                        weight: 1,
+                    });
+                    _layers.meshNodes.addLayer(cm);
+                });
+                if (!$('layerMeshNodes').checked) _map.removeLayer(_layers.meshNodes);
+            }
+
+            const allPts = (data.baseline_route || []).concat(data.optimised_route || []);
+            if (allPts.length > 0) {
+                _map.fitBounds(allPts.map(p => [p[0], p[1]]), {padding: [20, 20]});
+            }
+
+        } catch (e) {
+            $('err').innerHTML = '<div class="error">' + e.message + '</div>';
+        } finally {
+            $('go').disabled = false;
+            $('loading').style.display = 'none';
+        }
+    }
+
+    function toggleLayers() {
+        if (!_map) return;
+        const setLayer = (name, checkbox) => {
+            const layer = _layers[name];
+            if (!layer) return;
+            if (checkbox.checked) {
+                _map.addLayer(layer);
+            } else {
+                _map.removeLayer(layer);
+            }
+        };
+        setLayer('base', $('layerBase'));
+        setLayer('opt', $('layerOpt'));
+        setLayer('meshEdges', $('layerMeshEdges'));
+        setLayer('meshNodes', $('layerMeshNodes'));
+    }
+
+    ['layerBase','layerOpt','layerMeshEdges','layerMeshNodes'].forEach(id => {
+        $(id).addEventListener('change', toggleLayers);
+    });
+
+    async function batchRun() {
+        const start = $('start').value.trim();
+        const end = $('end').value.trim();
+        const speed = $('speed').value;
+        const batchStart = $('batchStart').value;
+        const batchEnd = $('batchEnd').value;
+        if (!batchStart || !batchEnd) { alert('Please select batch start and end dates'); return; }
+
+        $('batchGo').disabled = true;
+        $('batchProgressWrap').style.display = 'block';
+        $('err').innerHTML = '';
+        $('results').innerHTML = '';
+
+        try {
+            const controller = new AbortController();
+            const year = batchStart.substring(0, 4);
+            const r = await fetch(`/batch_stream?start=${encodeURIComponent(start)}&end=${encodeURIComponent(end)}&speed=${speed}&year=${year}`, {
+                signal: controller.signal
+            });
+            const reader = r.body.getReader();
+            const decoder = new TextDecoder();
+            let buf = '';
+            const records = [];
+            let t0 = Date.now();
+
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+                buf += decoder.decode(value, {stream: true});
+                const lines = buf.split('\n');
+                buf = lines.pop();
+                for (const line of lines) {
+                    if (!line.startsWith('data: ')) continue;
+                    const payload = line.slice(6).trim();
+                    if (!payload) continue;
+                    let msg;
+                    try { msg = JSON.parse(payload); } catch(e) { continue; }
+                    if (msg.type === 'result') {
+                        records.push(msg);
+                        const pct = Math.round((msg.day / msg.total) * 100);
+                        $('batchBar').style.width = pct + '%';
+                        const elapsed = (Date.now() - t0) / 1000;
+                        const rate = msg.day / elapsed;
+                        const remaining = msg.total - msg.day;
+                        const etaSec = Math.round(remaining * rate);
+                        const etaMin = Math.round(etaSec / 60);
+                        $('batchText').textContent = `Day ${msg.day} / ${msg.total} (${pct}%)`;
+                        $('batchEta').textContent = `~${etaMin} min remaining`;
+                    } else if (msg.type === 'done') {
+                        $('batchBar').style.width = '100%';
+                        $('batchText').textContent = 'Complete';
+                        $('batchEta').textContent = '';
+                    } else if (msg.type === 'preload') {
+                        $('batchText').textContent = 'Pre-loading weather…';
+                    }
+                }
+            }
+
+            if (records.length === 0) { $('err').innerHTML = '<div class="error">No batch results received.</div>'; return; }
+
+            // Aggregate batch stats
+            const noWind = records.filter(r => !r.error).map(r => r.standard_no_wind_t);
+            const withWind = records.filter(r => !r.error).map(r => r.standard_with_wind_t);
+            const opt = records.filter(r => !r.error).map(r => r.optimised_with_wind_t);
+            const dets = records.filter(r => !r.error);
+            const avgDetour = dets.length ? (dets.reduce((a,b) => a + b.detour_pct, 0) / dets.length).toFixed(1) : '0';
+            const avgBaseDist = dets.length ? (dets.reduce((a,b) => a + b.baseline_distance_nm, 0) / dets.length).toFixed(0) : '0';
+            const avgOptDist = dets.length ? (dets.reduce((a,b) => a + b.optimised_distance_nm, 0) / dets.length).toFixed(0) : '0';
+
+            $('statsBar').innerHTML = `
+<div class="stat-card"><div class="val">${records.length} days</div><div class="lbl">Batch size</div></div>
+<div class="stat-card red"><div class="val">${avgBaseDist} nm</div><div class="lbl">Avg baseline</div></div>
+<div class="stat-card"><div class="val">${avgOptDist} nm</div><div class="lbl">Avg optimised</div></div>
+<div class="stat-card"><div class="val">${avgDetour}%</div><div class="lbl">Avg detour</div></div>`;
+            $('statsPanel').style.display = '';
+
+            $('results').innerHTML = `
+<div class="results panel">
+<h3>Batch results (${records.length} days)</h3>
+<table>
+<tr><th>Date</th><th class="num">Std (no wind) t</th><th class="num">Std (wind) t</th><th class="num">Optimised t</th><th class="num">Wind sav t</th><th class="num">Opt sav t</th><th class="num">Base dist nm</th><th class="num">Opt dist nm</th><th class="num">Detour %</th><th class="num">Detour h</th></tr>` +
+records.map(r => r.error ? `<tr><td>${r.date}</td><td colspan="9" class="red">Error: ${r.error}</td></tr>` :
+`<tr><td>${r.date}</td><td class="num">${r.standard_no_wind_t}</td><td class="num">${r.standard_with_wind_t}</td><td class="num green"><strong>${r.optimised_with_wind_t}</strong></td><td class="num">${r.wind_savings_t}</td><td class="num green"><strong>${r.optimisation_extra_t}</strong></td><td class="num">${r.baseline_distance_nm}</td><td class="num">${r.optimised_distance_nm}</td><td class="num">${r.detour_pct}</td><td class="num">${r.detour_hours}</td></tr>`
+).join('') + `</table></div>`;
+
+        } catch (e) {
+            $('err').innerHTML = '<div class="error">Batch failed: ' + e.message + '</div>';
+        } finally {
+            $('batchGo').disabled = false;
+            setTimeout(() => { $('batchProgressWrap').style.display = 'none'; }, 3000);
+        }
+    }
+</script>
+</body>
+</html>
