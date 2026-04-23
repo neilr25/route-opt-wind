@@ -1,16 +1,20 @@
 """FastAPI wrapper around the route optimisation engine."""
 
+import json
+from datetime import date as date_cls, timedelta
 from pathlib import Path
-from typing import Tuple, List
+from typing import List, Optional, Tuple
 
 import uvicorn
 from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, StreamingResponse
 import networkx as nx
+import pandas as pd
 
 from route_opt.baseline import baseline_route as _baseline_route
 from route_opt.mesh import corridor_graph
 from route_opt.optimizer import optimise
+from route_opt.weather_client import preload_year
 from route_opt.visualizer import plot_routes
 
 # Global mesh cache: {(start, end) tuple hash: graph}
@@ -76,6 +80,7 @@ def optimize(
     end: str = Query(..., description="End lat,lon or named port"),
     speed: float = Query(default=12.0, ge=1, le=25, description="Ship speed in knots"),
     voyage_date: str = Query(default="2025-06-01", pattern=r"^\d{4}-\d{2}-\d{2}$"),
+    max_detour_pct: Optional[float] = Query(default=None, description="Max route detour as % of baseline distance (e.g. 10 for 10%)"),
     viz: bool = Query(default=False, description="Return Plotly HTML snippet?"),
 ):
     """Run optimisation and return baseline + optimised routes with fuel estimates."""
@@ -91,11 +96,19 @@ def optimize(
     baseline = _baseline_route(start_ll, end_ll)
     G = _graph_for_route(baseline)
     try:
-        path, cost_std_no_wind, cost_std_wind, cost_opt = optimise(
-            G, baseline, start_ll, end_ll, voyage_date, speed
+        result_tuple = optimise(
+            G, baseline, start_ll, end_ll, voyage_date, speed,
+            max_detour_pct=max_detour_pct,
         )
+        path, cost_std_no_wind, cost_std_wind, cost_opt, baseline_dist_nm, opt_dist_nm = result_tuple
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Optimisation failed: {exc}")
+
+    # Compute distance metrics
+    detour_pct = ((opt_dist_nm - baseline_dist_nm) / baseline_dist_nm * 100) if baseline_dist_nm > 0 else 0
+    detour_hours = (opt_dist_nm - baseline_dist_nm) / speed if opt_dist_nm > baseline_dist_nm else 0
+    baseline_hours = baseline_dist_nm / speed
+    opt_hours = opt_dist_nm / speed
 
     result = {
         "baseline_route": baseline,
@@ -103,10 +116,154 @@ def optimize(
         "standard_no_wind_tonnes": round(cost_std_no_wind, 2),
         "standard_with_wind_tonnes": round(cost_std_wind, 2),
         "optimised_with_wind_tonnes": round(cost_opt, 2),
+        "baseline_distance_nm": round(baseline_dist_nm, 1),
+        "optimised_distance_nm": round(opt_dist_nm, 1),
+        "detour_pct": round(detour_pct, 1),
+        "detour_hours": round(detour_hours, 1),
+        "baseline_hours": round(baseline_hours, 1),
+        "optimised_hours": round(opt_hours, 1),
         "mesh": _serialize_mesh(G),
     }
 
     return result
+
+
+@app.get("/batch")
+def batch_optimise(
+    start: str = Query(default="ROTTERDAM"),
+    end: str = Query(default="NEW YORK"),
+    speed: float = Query(default=12.0, ge=1, le=25),
+    year: int = Query(default=2025),
+    max_detour_pct: Optional[float] = Query(default=None),
+):
+    """Run batch optimisation for a full year. Returns JSON array of results."""
+    try:
+        start_ll = _parse_ll(start)
+    except ValueError:
+        start_ll = _named_port(start)
+    try:
+        end_ll = _parse_ll(end)
+    except ValueError:
+        end_ll = _named_port(end)
+
+    baseline = _baseline_route(start_ll, end_ll)
+    G = _graph_for_route(baseline)
+
+    # Pre-load weather
+    mesh_points = [(d["lat"], d["lon"]) for _, d in G.nodes(data=True)]
+    all_points = list(set(mesh_points + list(baseline)))
+    preload_year(year, sample_points=all_points)
+
+    d = date_cls(year, 1, 1)
+    total_days = (date_cls(year, 12, 31) - d).days + 1
+    records = []
+
+    for day_num in range(total_days):
+        date_str = d.strftime("%Y-%m-%d")
+        try:
+            result_tuple = optimise(
+                G, baseline, start_ll, end_ll, date_str, speed,
+                max_detour_pct=max_detour_pct,
+            )
+            path, cost_no, cost_wind, cost_opt, base_dist, opt_dist = result_tuple
+            savings_std = cost_no - cost_wind
+            savings_opt = cost_wind - cost_opt
+            detour_pct = ((opt_dist - base_dist) / base_dist * 100) if base_dist > 0 else 0
+            detour_hours = (opt_dist - base_dist) / speed if opt_dist > base_dist else 0
+            records.append({
+                "date": date_str,
+                "standard_no_wind_t": round(cost_no, 2),
+                "standard_with_wind_t": round(cost_wind, 2),
+                "optimised_with_wind_t": round(cost_opt, 2),
+                "wind_savings_t": round(savings_std, 2),
+                "optimisation_extra_t": round(savings_opt, 2),
+                "total_savings_t": round(savings_std + savings_opt, 2),
+                "baseline_distance_nm": round(base_dist, 1),
+                "optimised_distance_nm": round(opt_dist, 1),
+                "detour_pct": round(detour_pct, 1),
+                "detour_hours": round(detour_hours, 1),
+            })
+        except Exception as exc:
+            records.append({
+                "date": date_str,
+                "error": str(exc),
+            })
+        d += timedelta(days=1)
+
+    return records
+
+
+@app.get("/batch_stream")
+def batch_stream(
+    start: str = Query(default="ROTTERDAM"),
+    end: str = Query(default="NEW YORK"),
+    speed: float = Query(default=12.0, ge=1, le=25),
+    year: int = Query(default=2025),
+    max_detour_pct: Optional[float] = Query(default=None),
+):
+    """Stream batch results via Server-Sent Events (SSE)."""
+    try:
+        start_ll = _parse_ll(start)
+    except ValueError:
+        start_ll = _named_port(start)
+    try:
+        end_ll = _parse_ll(end)
+    except ValueError:
+        end_ll = _named_port(end)
+
+    baseline = _baseline_route(start_ll, end_ll)
+    G = _graph_for_route(baseline)
+
+    mesh_points = [(d["lat"], d["lon"]) for _, d in G.nodes(data=True)]
+    all_points = list(set(mesh_points + list(baseline)))
+
+    def generate():
+        # Send pre-load event
+        yield f"data: {json.dumps({'type': 'preload', 'year': year})}\n\n"
+
+        preload_year(year, sample_points=all_points)
+
+        yield f"data: {json.dumps({'type': 'preload_done', 'year': year})}\n\n"
+
+        d = date_cls(year, 1, 1)
+        total_days = (date_cls(year, 12, 31) - d).days + 1
+
+        for day_num in range(total_days):
+            date_str = d.strftime("%Y-%m-%d")
+            try:
+                result_tuple = optimise(
+                    G, baseline, start_ll, end_ll, date_str, speed,
+                    max_detour_pct=max_detour_pct,
+                )
+                path, cost_no, cost_wind, cost_opt, base_dist, opt_dist = result_tuple
+                savings_std = cost_no - cost_wind
+                savings_opt = cost_wind - cost_opt
+                detour_pct = ((opt_dist - base_dist) / base_dist * 100) if base_dist > 0 else 0
+                detour_hours = (opt_dist - base_dist) / speed if opt_dist > base_dist else 0
+                result = {
+                    "type": "result",
+                    "day": day_num + 1,
+                    "total": total_days,
+                    "date": date_str,
+                    "standard_no_wind_t": round(cost_no, 2),
+                    "standard_with_wind_t": round(cost_wind, 2),
+                    "optimised_with_wind_t": round(cost_opt, 2),
+                    "wind_savings_t": round(savings_std, 2),
+                    "optimisation_extra_t": round(savings_opt, 2),
+                    "baseline_distance_nm": round(base_dist, 1),
+                    "optimised_distance_nm": round(opt_dist, 1),
+                    "detour_pct": round(detour_pct, 1),
+                    "detour_hours": round(detour_hours, 1),
+                }
+            except Exception as exc:
+                result = {"type": "error", "date": date_str, "error": str(exc)}
+
+            yield f"data: {json.dumps(result)}\n\n"
+            d += timedelta(days=1)
+
+        yield f"data: {json.dumps({'type': 'done', 'total': total_days})}\n\n"
+
+    return StreamingResponse(generate(), media_type="text/event-stream")
 
 
 def _parse_ll(val: str) -> Tuple[float, float]:

@@ -34,6 +34,14 @@ def _bearing_seg(a: Tuple[float, float], b: Tuple[float, float]) -> float:
     return (math.degrees(math.atan2(x, y)) + 360) % 360
 
 
+def _route_distance_nm(path: List[Tuple[float, float]]) -> float:
+    """Total route distance in nautical miles."""
+    total = 0.0
+    for i in range(len(path) - 1):
+        total += _haversine_nm(path[i], path[i + 1])
+    return total
+
+
 def optimise(
     G: nx.DiGraph,
     baseline: List[Tuple[float, float]],
@@ -41,14 +49,21 @@ def optimise(
     goal_ll: Tuple[float, float],
     date: str,
     ship_speed_kts: float,
-) -> Tuple[List[Tuple[float, float]], float, float, float]:
+    max_detour_pct: Optional[float] = None,
+) -> Tuple[List[Tuple[float, float]], float, float, float, float, float]:
     """
     A* search through corridor graph.
     Returns:
-        - optimised path  as list of (lat, lon)
+        - optimised path as list of (lat, lon)
         - cost_standard_no_wind (tonnes — baseline route, no wind assist)
         - cost_standard_with_wind (tonnes — baseline route, with wind)
         - cost_optimised (tonnes — optimised route, with wind)
+        - baseline_distance_nm (nautical miles)
+        - optimised_distance_nm (nautical miles)
+    
+    If max_detour_pct is set, the optimised route distance is capped:
+    routes longer than baseline * (1 + max_detour_pct/100) are rejected and
+    the baseline is returned instead.
     """
     # ---- Find closest nodes to start/goal ----
     nodes = list(G.nodes(data=True))
@@ -60,19 +75,28 @@ def optimise(
     winds = wind_at_points(points, date)
     wind_map: Dict[Tuple[int, int], Tuple[float, float]] = {n[0]: w for n, w in zip(nodes, winds)}
 
+    # ---- Pre-compute edge metadata dicts for fast lookup ----
+    edge_bearings: Dict[Tuple[int, int], float] = {}
+    edge_distances_nm: Dict[Tuple[int, int], float] = {}
+    for u, v, data in G.edges(data=True):
+        edge_bearings[(u, v)] = data["bearing"]
+        edge_distances_nm[(u, v)] = data["distance_nm"]
+
     # ---- Pre-fetch weather for baseline waypoints ----
     baseline_winds = wind_at_points(baseline, date)
 
+    # ---- Compute baseline distance ----
+    baseline_dist_nm = _route_distance_nm(baseline)
+
     # ---- Standard route costs (baseline waypoints) ----
-    cost_std_no_wind = 0.0    # Standard ship WITHOUT wingsail, in actual wind
-    cost_std_with_wind = 0.0 # Standard ship WITH wingsail, in actual wind
+    cost_std_no_wind = 0.0
+    cost_std_with_wind = 0.0
     for i in range(len(baseline) - 1):
         a = baseline[i]
         b = baseline[i + 1]
         dist = _haversine_nm(a, b)
         hours = dist / ship_speed_kts
         bearing = _bearing_seg(a, b)
-        # Weather at destination point of segment
         ws_kmh, wd = baseline_winds[i + 1]
         ws_ms = ws_kmh  # data is already m/s
         f_no = fuel_without_wingsail(ws_ms, wd, bearing, hours)
@@ -82,7 +106,6 @@ def optimise(
 
     # ---- A* heuristic cache ----
     goal_coords = (G.nodes[goal_node]["lat"], G.nodes[goal_node]["lon"])
-    # Optimistic heuristic: assume calm fuel rate (no wind savings)
     h_cache: Dict[Tuple[int, int], float] = {}
     for n, d in nodes:
         dist = _haversine_nm((d["lat"], d["lon"]), goal_coords)
@@ -102,7 +125,7 @@ def optimise(
         current, prev = state
 
         if current == goal_node:
-            # Reconstruct
+            # Reconstruct path
             path = []
             tmp_state = state
             while True:
@@ -116,7 +139,16 @@ def optimise(
             path.reverse()
             path_ll = [(G.nodes[n]["lat"], G.nodes[n]["lon"]) for n in path]
             cost_opt = g_score[state]
-            return path_ll, cost_std_no_wind, cost_std_with_wind, cost_opt
+
+            # Compute optimised route distance
+            opt_dist_nm = _route_distance_nm(path_ll)
+
+            # Apply detour cap if requested
+            if max_detour_pct is not None and opt_dist_nm > baseline_dist_nm * (1 + max_detour_pct / 100):
+                # Optimised route is too long — fall back to baseline
+                return baseline, cost_std_no_wind, cost_std_with_wind, cost_std_with_wind, baseline_dist_nm, baseline_dist_nm
+
+            return path_ll, cost_std_no_wind, cost_std_with_wind, cost_opt, baseline_dist_nm, opt_dist_nm
 
         if state in visited:
             continue
@@ -128,15 +160,15 @@ def optimise(
 
         for neighbor in G.successors(current):
             edge_data = G.edges[current, neighbor]
-            
-            # HARD BLOCK: Skip land nodes (except center lane which follows maritime ATOBVIAC route)
+
+            # HARD BLOCK: Skip land nodes (except center lane)
             if G.nodes[neighbor].get("is_land", False) and G.nodes[neighbor].get("lane_idx", 0) != 0:
                 continue
-            
+
             # HARD BLOCK: Skip edges that cross land
             if edge_data.get("crosses_land", False):
                 continue
-            
+
             b = edge_data["bearing"]
             dist = edge_data["distance_nm"]
             ws, wd = wind_map.get(neighbor, (0.0, 0.0))
@@ -154,13 +186,12 @@ def optimise(
     # ---- Fallback: if A* exhausts, return baseline as optimised route ----
     cost_baseline_opt = sum(
         edge_cost(
-            baseline_winds[i + 1][0],   # wind speed at baseline point i+1
-            baseline_winds[i + 1][1],   # wind direction at baseline point i+1
+            baseline_winds[i + 1][0],
+            baseline_winds[i + 1][1],
             _bearing_seg(baseline[i], baseline[i + 1]),
             None,
             _haversine_nm(baseline[i], baseline[i + 1]) / ship_speed_kts,
         )
         for i in range(len(baseline) - 1)
     )
-    return baseline, cost_std_no_wind, cost_std_with_wind, cost_baseline_opt
-    # raise ValueError("No path found through corridor mesh.")
+    return baseline, cost_std_no_wind, cost_std_with_wind, cost_baseline_opt, baseline_dist_nm, baseline_dist_nm

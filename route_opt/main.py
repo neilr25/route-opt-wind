@@ -126,12 +126,12 @@ def main():
     G = corridor_graph(baseline)
 
     # Optimise route
-    path, cost_std_no_wind, cost_std_wind, cost_opt = optimise(
+    path, cost_std_no_wind, cost_std_wind, cost_opt, baseline_dist_nm, opt_dist_nm = optimise(
         G, baseline, start_coords, end_coords, args.date, args.speed
     )
 
     # Print savings
-    print_savings(cost_std_no_wind, cost_std_wind, cost_opt)
+    print_savings(cost_std_no_wind, cost_std_wind, cost_opt, baseline_dist_nm, opt_dist_nm, args.speed)
 
     # Generate visualisation if requested
     if args.viz:

@@ -109,7 +109,8 @@ def plot_routes(
     return fig
 
 
-def print_savings(cost_standard_no_wind: float, cost_standard_wind: float, cost_optimised: float) -> None:
+def print_savings(cost_standard_no_wind: float, cost_standard_wind: float, cost_optimised: float,
+                  baseline_dist_nm: float = 0, opt_dist_nm: float = 0, speed_kts: float = 12.0) -> None:
     """Print three-way comparison to console."""
     print("\n=== Route Comparison ===")
     print(f"{'Metric':<32} {'Value':>12}")
@@ -122,4 +123,12 @@ def print_savings(cost_standard_no_wind: float, cost_standard_wind: float, cost_
     pct_vs_opt = (saved_vs_opt / cost_standard_no_wind * 100) if cost_standard_no_wind > 0 else 0
     print(f"{'Wind assist on standard':<32} {saved_vs_standard:>12.2f} t ({pct_vs_standard:.1f}%)")
     print(f"{'Optimisation total savings':<32} {saved_vs_opt:>12.2f} t ({pct_vs_opt:.1f}%)")
+    # Distance metrics
+    if baseline_dist_nm > 0 and opt_dist_nm > 0:
+        detour_pct = ((opt_dist_nm - baseline_dist_nm) / baseline_dist_nm * 100)
+        detour_hours = (opt_dist_nm - baseline_dist_nm) / speed_kts
+        print(f"{'Baseline distance':<32} {baseline_dist_nm:>12.1f} nm")
+        print(f"{'Optimised distance':<32} {opt_dist_nm:>12.1f} nm")
+        print(f"{'Extra distance (detour)':<32} {opt_dist_nm - baseline_dist_nm:>12.1f} nm ({detour_pct:.1f}%)")
+        print(f"{'Extra time at {speed_kts:.0f} kts':<32} {detour_hours:>12.1f} h")
     print("========================\n")
