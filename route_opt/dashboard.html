@@ -41,6 +41,11 @@ input[type=date],input[type=number],input[type=text],select{box-sizing:border-bo
 #batchProgressWrap .bar{background:#0052cc;height:100%;width:0%;transition:width .3s;border-radius:4px}
 #batchProgressWrap .info{font-size:12px;color:#555;margin-top:6px}
 .green{color:#00cc96}.red{color:#ef553b}
+.date-link{color:#0052cc;text-decoration:underline;cursor:pointer}
+.date-link:hover{color:#003d99}
+.date-link.loading{color:#666;text-decoration:none;cursor:default}
+@keyframes rowFlash{0%{background:#dbe9ff}100%{background:transparent}}
+.row-flash{animation:rowFlash 1.2s ease-out}
 </style>
 </head>
 <body>
@@ -103,14 +108,20 @@ input[type=date],input[type=number],input[type=text],select{box-sizing:border-bo
     const $ = id => document.getElementById(id);
     let _map = null;
     let _layers = {};
+    let _lastStart = null, _lastEnd = null, _lastSpeed = null;
+    let _userHasMovedMap = false;
 
     async function run() {
         $('go').disabled = true;
         $('loading').style.display = 'block';
         $('err').innerHTML = '';
         $('results').innerHTML = '';
-        $('map').innerHTML = '';
-        if (_map) { _map.remove(); _map = null; }
+        if (_map) {
+            Object.values(_layers).forEach(layer => { if (layer) _map.removeLayer(layer); });
+            _layers = {};
+        } else {
+            $('map').innerHTML = '';
+        }
         $('statsPanel').style.display = 'none';
 
         const start = $('start').value.trim();
@@ -118,6 +129,9 @@ input[type=date],input[type=number],input[type=text],select{box-sizing:border-bo
         const date = $('date').value;
         const speed = $('speed').value;
         const maxDetour = $('maxDetour').value;
+        _lastStart = start;
+        _lastEnd = end;
+        _lastSpeed = speed;
 
         try {
             const controller = new AbortController();
@@ -168,7 +182,11 @@ input[type=date],input[type=number],input[type=text],select{box-sizing:border-bo
                 </div>`;
 
             // Map
-            _map = L.map('map');
+            if (!_map) {
+                _map = L.map('map');
+                _userHasMovedMap = false;
+                _map.on('movestart', () => { _userHasMovedMap = true; });
+            }
             L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
                 attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
             }).addTo(_map);
@@ -259,12 +277,108 @@ input[type=date],input[type=number],input[type=text],select{box-sizing:border-bo
         $(id).addEventListener('change', toggleLayers);
     });
 
+    // Click handler for batch table date links
+    function clearRouteLayers() {
+        ['base', 'opt'].forEach(k => {
+            if (_layers[k] && _map) {
+                _map.removeLayer(_layers[k]);
+                delete _layers[k];
+            }
+        });
+    }
+
+    function drawRoutes(data) {
+        if (data.baseline_route && data.baseline_route.length > 1) {
+            const baseLine = data.baseline_route.map(p => [p[0], p[1]]);
+            _layers.base = L.polyline(baseLine, {color: '#EF553B', weight: 3, opacity: 0.8}).addTo(_map).bindPopup('Baseline route');
+        }
+        if (data.optimised_route && data.optimised_route.length > 1) {
+            const optLine = data.optimised_route.map(p => [p[0], p[1]]);
+            _layers.opt = L.polyline(optLine, {color: '#00CC96', weight: 4, opacity: 0.9}).addTo(_map).bindPopup('Optimised route');
+        }
+        toggleLayers();
+    }
+
+    function displayDayOnMap(data) {
+        if (!_map) {
+            _map = L.map('map');
+            _userHasMovedMap = false;
+            _map.on('movestart', () => { _userHasMovedMap = true; });
+            L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+                attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+            }).addTo(_map);
+        }
+        clearRouteLayers();
+        drawRoutes(data);
+        const allPts = (data.baseline_route || []).concat(data.optimised_route || []);
+        if (allPts.length > 0 && !_userHasMovedMap) {
+            _map.fitBounds(allPts.map(p => [p[0], p[1]]), {padding: [20, 20]});
+        }
+    }
+
+    function updateStatsPanel(data) {
+        const baseDist = data.baseline_distance_nm;
+        const optDist = data.optimised_distance_nm;
+        const detourPct = data.detour_pct;
+        const detourHours = data.detour_hours;
+        const detourSign = detourPct > 0 ? '+' : '';
+        $('statsBar').innerHTML = `
+            <div class="stat-card red"><div class="val">${baseDist.toLocaleString()} nm</div><div class="lbl">Baseline</div></div>
+            <div class="stat-card"><div class="val">${optDist.toLocaleString()} nm</div><div class="lbl">Optimised</div></div>
+            <div class="stat-card"><div class="val">${detourSign}${detourPct}%</div><div class="lbl">Detour</div></div>
+            <div class="stat-card"><div class="val">${detourSign}${detourHours} h</div><div class="lbl">Extra time</div></div>`;
+        $('statsPanel').style.display = '';
+    }
+
+    async function handleDateClick(e) {
+        e.preventDefault();
+        const link = e.target.closest('.date-link');
+        if (!link || link.classList.contains('loading')) return;
+        const date = link.dataset.date;
+        const row = document.querySelector(`tr[data-date="${date}"]`);
+        if (!_lastStart || !_lastEnd) {
+            alert('Run a batch or single analysis first');
+            return;
+        }
+        if (row) row.classList.add('row-flash');
+        link.classList.add('loading');
+        const originalText = link.textContent;
+        link.textContent = 'Loading route…';
+
+        let url = `/optimize?start=${encodeURIComponent(_lastStart)}&end=${encodeURIComponent(_lastEnd)}&voyage_date=${date}&speed=${_lastSpeed}`;
+        try {
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 120000);
+            const r = await fetch(url, { signal: controller.signal });
+            clearTimeout(timeoutId);
+            const data = await r.json();
+            if (!r.ok) throw new Error(data.detail || 'Request failed');
+            displayDayOnMap(data);
+            updateStatsPanel(data);
+            $('map').scrollIntoView({ behavior: 'smooth', block: 'start' });
+        } catch (err) {
+            $('err').innerHTML = '<div class="error">' + err.message + '</div>';
+        } finally {
+            link.classList.remove('loading');
+            link.textContent = originalText;
+            if (row) setTimeout(() => row.classList.remove('row-flash'), 1200);
+        }
+    }
+
+    $('results').addEventListener('click', e => {
+        const link = e.target.closest('.date-link');
+        if (link) handleDateClick(e);
+    });
+
     async function batchRun() {
         const start = $('start').value.trim();
         const end = $('end').value.trim();
         const speed = $('speed').value;
         const batchStart = $('batchStart').value;
         const batchEnd = $('batchEnd').value;
+        _lastStart = start;
+        _lastEnd = end;
+        _lastSpeed = speed;
         if (!batchStart || !batchEnd) { alert('Please select batch start and end dates'); return; }
 
         $('batchGo').disabled = true;
@@ -338,10 +452,10 @@ input[type=date],input[type=number],input[type=text],select{box-sizing:border-bo
             $('results').innerHTML = `
 <div class="results panel">
 <h3>Batch results (${records.length} days)</h3>
-<table>
+<table id="batchTable">
 <tr><th>Date</th><th class="num">Std (no wind) t</th><th class="num">Std (wind) t</th><th class="num">Optimised t</th><th class="num">Wind sav t</th><th class="num">Opt sav t</th><th class="num">Base dist nm</th><th class="num">Opt dist nm</th><th class="num">Detour %</th><th class="num">Detour h</th></tr>` +
-records.map(r => r.error ? `<tr><td>${r.date}</td><td colspan="9" class="red">Error: ${r.error}</td></tr>` :
-`<tr><td>${r.date}</td><td class="num">${r.standard_no_wind_t}</td><td class="num">${r.standard_with_wind_t}</td><td class="num green"><strong>${r.optimised_with_wind_t}</strong></td><td class="num">${r.wind_savings_t}</td><td class="num green"><strong>${r.optimisation_extra_t}</strong></td><td class="num">${r.baseline_distance_nm}</td><td class="num">${r.optimised_distance_nm}</td><td class="num">${r.detour_pct}</td><td class="num">${r.detour_hours}</td></tr>`
+records.map(r => r.error ? `<tr data-date="${r.date}"><td><a href="javascript:void(0)" class="date-link" data-date="${r.date}">${r.date}</a></td><td colspan="9" class="red">Error: ${r.error}</td></tr>` :
+`<tr data-date="${r.date}"><td><a href="javascript:void(0)" class="date-link" data-date="${r.date}">${r.date}</a></td><td class="num">${r.standard_no_wind_t}</td><td class="num">${r.standard_with_wind_t}</td><td class="num green"><strong>${r.optimised_with_wind_t}</strong></td><td class="num">${r.wind_savings_t}</td><td class="num green"><strong>${r.optimisation_extra_t}</strong></td><td class="num">${r.baseline_distance_nm}</td><td class="num">${r.optimised_distance_nm}</td><td class="num">${r.detour_pct}</td><td class="num">${r.detour_hours}</td></tr>`
 ).join('') + `</table></div>`;
 
         } catch (e) {
