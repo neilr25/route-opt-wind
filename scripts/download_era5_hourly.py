@@ -182,6 +182,10 @@ def convert_to_parquet(nc_file, year, month):
     # Convert xarray to DataFrame using vectorized operations
     # Stack all dimensions into a flat table
     df = ds.to_dataframe().reset_index()
+
+    # CDS API uses 'valid_time' instead of 'time' (new CDS API format)
+    if 'valid_time' in df.columns:
+        df = df.rename(columns={'valid_time': 'time'})
     
     # Convert u10/v10 to wind speed and direction using vectorized operations
     df['wind_speed_10m'] = np.sqrt(df['u10']**2 + df['v10']**2)
@@ -280,10 +284,19 @@ Examples:
             print(f"\nSuccess! Data saved to: {parquet_file}")
         except Exception as e:
             print(f"Error during conversion: {e}")
-            # Clean up temporary file on error
+            # Clean up temporary file on error (try to close nc handle first)
+            try:
+                import xarray as xr_cleanup
+                ds_cleanup = xr_cleanup.open_dataset(nc_file)
+                ds_cleanup.close()
+            except Exception:
+                pass
             if nc_file.exists():
-                nc_file.unlink()
-                print(f"Cleaned up temporary file: {nc_file}")
+                try:
+                    nc_file.unlink()
+                    print(f"Cleaned up temporary file: {nc_file}")
+                except PermissionError:
+                    pass
             sys.exit(1)
 
 

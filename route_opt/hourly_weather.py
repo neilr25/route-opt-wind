@@ -1,6 +1,6 @@
 """Hourly weather lookup with time-based interpolation.
 
-Reads ERA5 hourly Parquet files (C:\app\data\hourly\weather_YYYY-MM_hourly.parquet)
+Reads ERA5 hourly Parquet files (`C:\\app\\data\\hourly\\weather_YYYY-MM_hourly.parquet`)
 and returns wind at (lat, lon, datetime) with bilinear time interpolation.
 """
 
@@ -52,7 +52,7 @@ def _build_hourly_cache(year: int, points: List[Tuple[float, float]]) -> dict:
         raise FileNotFoundError(f"No hourly weather data for {year}")
 
     all_data = pd.concat(dfs, ignore_index=True)
-    all_data["hour"] = pd.to_datetime(all_data["time"]).dt.floor("H")
+    all_data["hour"] = pd.to_datetime(all_data["time"]).dt.floor("h")
 
     merged = all_data.merge(pts_df, on=["latitude", "longitude"], how="inner")
     if merged.empty:
