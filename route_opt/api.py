@@ -231,7 +231,7 @@ def batch_stream(
     year = d.year
     total_days = (end_d - d).days + 1
 
-    mesh_points = [(d["lat"], d["lon"]) for _, d in G.nodes(data=True)]
+    mesh_points = [(nd["lat"], nd["lon"]) for _, nd in G.nodes(data=True)]
     all_points = list(set(mesh_points + list(baseline)))
 
     def generate():
@@ -246,9 +246,10 @@ def batch_stream(
         yield f"data: {json.dumps({'type': 'preload_done', 'total': total_days})}\n\n"
 
         for day_num in range(total_days):
-            date_str = d.strftime("%Y-%m-%d")
-            voyage_dt = datetime(d.year, d.month, d.day)
             try:
+                current_date = d + timedelta(days=day_num)
+                date_str = current_date.strftime("%Y-%m-%d")
+                voyage_dt = datetime(current_date.year, current_date.month, current_date.day)
                 result_tuple = optimise(
                     G, baseline, start_ll, end_ll, date_str, speed,
                     voyage_datetime=voyage_dt,
@@ -278,10 +279,9 @@ def batch_stream(
                     "detour_hours": round(detour_hours, 1),
                 }
             except Exception as exc:
-                result = {"type": "error", "date": date_str, "error": str(exc)}
+                result = {"type": "error", "day": day_num + 1, "total": total_days, "date": date_str, "error": str(exc)}
 
             yield f"data: {json.dumps(result)}\n\n"
-            d += timedelta(days=1)
 
         yield f"data: {json.dumps({'type': 'done', 'total': total_days})}\n\n"
 
