@@ -55,6 +55,8 @@ def _build_hourly_cache(year: int, points: List[Tuple[float, float]]) -> dict:
     all_data["hour"] = pd.to_datetime(all_data["time"]).dt.floor("H")
 
     merged = all_data.merge(pts_df, on=["latitude", "longitude"], how="inner")
+    if merged.empty:
+        raise FileNotFoundError(f"No hourly data for requested points in {year}")
     hours = sorted(merged["hour"].unique())
     hour_index = {h: i for i, h in enumerate(hours)}
     n_hours = len(hours)
@@ -96,7 +98,9 @@ def wind_at_points_hourly(
     if not points:
         return []
 
-    assert len(points) == len(datetimes)
+    if len(points) == 1 and len(datetimes) >= 1:
+        # Single point queried for multiple times — expand to match lengths
+        points = points * len(datetimes)
     if not datetimes:
         return []
 

@@ -15,8 +15,9 @@ from route_opt.baseline import baseline_route as _baseline_route
 from route_opt.mesh import corridor_graph
 from route_opt.optimizer import optimise
 from route_opt.weather_client import preload_year
-from route_opt.hourly_weather import preload_year_hourly
+from route_opt.hourly_weather import preload_year_hourly, wind_at_points_hourly
 from route_opt.visualizer import plot_routes
+from route_opt.api_helpers import _serialize_mesh, _parse_ll, _named_port
 
 # Global mesh cache: {(start, end) tuple hash: graph}
 _mesh_cache: dict[int, nx.DiGraph] = {}
@@ -32,34 +33,6 @@ def _graph_for_route(baseline: List[Tuple[float, float]]) -> nx.DiGraph:
 app = FastAPI(title="SGS Route Optimiser", version="1.0.0")
 
 _DASHBOARD_PATH = Path(__file__).resolve().parent / "dashboard.html"
-
-
-def _serialize_mesh(G):
-    """Return compact JSON-ready dict of mesh nodes + edges with full debug attrs."""
-    nodes = {}
-    for n, d in G.nodes(data=True):
-        nodes[n] = {
-            "id": n,
-            "lat": d["lat"],
-            "lon": d["lon"],
-            "stage_idx": d.get("stage_idx", None),
-            "lane_idx": d.get("lane_idx", None),
-            "is_land": bool(d.get("is_land", False)),
-        }
-    edges = []
-    for u, v, d in G.edges(data=True):
-        edges.append({
-            "u": u,
-            "v": v,
-            "u_lat": nodes[u]["lat"],
-            "u_lon": nodes[u]["lon"],
-            "v_lat": nodes[v]["lat"],
-            "v_lon": nodes[v]["lon"],
-            "bearing": round(d.get("bearing", 0), 2),
-            "distance_nm": round(d.get("distance_nm", 0), 2),
-            "crosses_land": bool(d.get("crosses_land", False)),
-        })
-    return {"nodes": list(nodes.values()), "edges": edges, "edge_count": len(edges)}
 
 
 @app.get("/health")
@@ -285,6 +258,32 @@ def batch_stream(
         yield f"data: {json.dumps({'type': 'done', 'total': total_days})}\n\n"
 
     return StreamingResponse(generate(), media_type="text/event-stream")
+
+
+@app.get("/weather_hourly")
+def weather_hourly(
+    lat: float = Query(..., ge=-90, le=90),
+    lon: float = Query(..., ge=-180, le=180),
+    date: str = Query(..., pattern=r"^\d{4}-\d{2}-\d{2}$"),
+):
+    """Return 24 hourly wind readings for a single lat/lon on a given date."""
+    from route_opt.hourly_direct import read_hourly_for_point
+    try:
+        winds = read_hourly_for_point(lat, lon, date)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail=f"No hourly data for {date}. Generate it first via scripts/generate_hourly_for_route.py")
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+    return {
+        "date": date,
+        "lat": lat,
+        "lon": lon,
+        "hours": [
+            {"hour": h, "wind_speed_ms": round(ws, 2), "wind_direction_deg": round(wd, 1)}
+            for h, (ws, wd) in enumerate(winds)
+        ]
+    }
 
 
 def _parse_ll(val: str) -> Tuple[float, float]:
