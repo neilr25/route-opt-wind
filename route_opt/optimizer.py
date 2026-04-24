@@ -1,17 +1,19 @@
-"""State-space A* optimizer with weather-aware edge costs."""
+"""State-space A* optimizer with hourly weather-aware edge costs."""
 
 import heapq
 import math
+from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 
 import networkx as nx
 
 from route_opt.cost_engine import edge_cost, fuel_no_wind, fuel_with_wind, fuel_without_wingsail
 from route_opt.weather_client import wind_at_points
+from route_opt.hourly_weather import wind_at_points_hourly
+from route_opt.time_engine import baseline_etas, node_etas
 
 
 def _haversine_nm(a: Tuple[float, float], b: Tuple[float, float]) -> float:
-    """Heuristic distance in nautical miles."""
     R = 3440.065
     lat1, lon1 = math.radians(a[0]), math.radians(a[1])
     lat2, lon2 = math.radians(b[0]), math.radians(b[1])
@@ -21,11 +23,7 @@ def _haversine_nm(a: Tuple[float, float], b: Tuple[float, float]) -> float:
     return 2 * R * math.asin(math.sqrt(hav))
 
 
-State = Tuple[Tuple[int, int], Optional[Tuple[int, int]]]  # (node, prev_node)
-
-
 def _bearing_seg(a: Tuple[float, float], b: Tuple[float, float]) -> float:
-    """Bearing from a to b in degrees (0-360)."""
     lat1, lon1 = math.radians(a[0]), math.radians(a[1])
     lat2, lon2 = math.radians(b[0]), math.radians(b[1])
     dlon = lon2 - lon1
@@ -35,11 +33,40 @@ def _bearing_seg(a: Tuple[float, float], b: Tuple[float, float]) -> float:
 
 
 def _route_distance_nm(path: List[Tuple[float, float]]) -> float:
-    """Total route distance in nautical miles."""
-    total = 0.0
-    for i in range(len(path) - 1):
-        total += _haversine_nm(path[i], path[i + 1])
-    return total
+    return sum(_haversine_nm(path[i], path[i + 1]) for i in range(len(path) - 1))
+
+
+State = Tuple[Tuple[int, int], Optional[Tuple[int, int]]]
+
+
+def _baseline_costs(baseline, voyage_dt, speed_kts):
+    """Return baseline costs using hourly weather."""
+    etas = baseline_etas(baseline, voyage_dt, speed_kts)
+    baseline_winds = wind_at_points_hourly(baseline, etas)
+    cost_std_no_wind = 0.0
+    cost_std_with_wind = 0.0
+    for i in range(len(baseline) - 1):
+        a = baseline[i]
+        b = baseline[i + 1]
+        dist = _haversine_nm(a, b)
+        hours = dist / speed_kts
+        bearing = _bearing_seg(a, b)
+        ws_ms, wd = baseline_winds[i]
+        f_no = fuel_without_wingsail(ws_ms, wd, bearing, hours)
+        cost_std_no_wind += f_no
+        f_wi = fuel_with_wind(ws_ms, wd, bearing, hours)
+        cost_std_with_wind += min(f_no, f_wi)
+    return cost_std_no_wind, cost_std_with_wind
+
+
+def _fetch_hourly_winds(G, nodes, node_etas_map):
+    """Fetch hourly wind for all nodes, falling back to daily if hourly unavailable."""
+    points = [(d["lat"], d["lon"]) for _, d in nodes]
+    etas = [node_etas_map.get(n[0], datetime.min) for n in nodes]
+    if datetime.min in etas:
+        # Fallback: use daily weather if ETAs can't be built
+        return wind_at_points(points, etas[0].strftime("%Y-%m-%d"))
+    return wind_at_points_hourly(points, etas)
 
 
 def optimise(
@@ -49,6 +76,7 @@ def optimise(
     goal_ll: Tuple[float, float],
     date: str,
     ship_speed_kts: float,
+    voyage_datetime: Optional[datetime] = None,
     max_detour_pct: Optional[float] = None,
 ) -> Tuple[List[Tuple[float, float]], float, float, float, float, float]:
     """
@@ -58,21 +86,27 @@ def optimise(
         - cost_standard_no_wind (tonnes — baseline route, no wind assist)
         - cost_standard_with_wind (tonnes — baseline route, with wind)
         - cost_optimised (tonnes — optimised route, with wind)
-        - baseline_distance_nm (nautical miles)
-        - optimised_distance_nm (nautical miles)
-    
-    If max_detour_pct is set, the optimised route distance is capped:
-    routes longer than baseline * (1 + max_detour_pct/100) are rejected and
-    the baseline is returned instead.
+        - baseline_distance_nm
+        - optimised_distance_nm
     """
-    # ---- Find closest nodes to start/goal ----
+    # Parse voyage start datetime
+    if voyage_datetime is None:
+        voyage_datetime = datetime.strptime(date, "%Y-%m-%d")
+
     nodes = list(G.nodes(data=True))
     start_node = min(nodes, key=lambda n: _haversine_nm(start_ll, (n[1]["lat"], n[1]["lon"])))[0]
     goal_node = min(nodes, key=lambda n: _haversine_nm(goal_ll, (n[1]["lat"], n[1]["lon"])))[0]
 
-    # ---- Pre-fetch weather for all graph nodes ----
-    points = [(d["lat"], d["lon"]) for _, d in nodes]
-    winds = wind_at_points(points, date)
+    # ---- Compute node ETAs using time_engine ----
+    stage_indices = G.graph.get("stage_indices")
+    if stage_indices:
+        node_etas_map = node_etas(G, baseline, stage_indices, voyage_datetime, ship_speed_kts)
+    else:
+        # Fallback to daily if no stage indices available
+        node_etas_map = {}
+
+    # ---- Pre-fetch hourly weather for all graph nodes ----
+    winds = _fetch_hourly_winds(G, nodes, node_etas_map)
     wind_map: Dict[Tuple[int, int], Tuple[float, float]] = {n[0]: w for n, w in zip(nodes, winds)}
 
     # ---- Pre-compute edge metadata dicts for fast lookup ----
@@ -82,27 +116,11 @@ def optimise(
         edge_bearings[(u, v)] = data["bearing"]
         edge_distances_nm[(u, v)] = data["distance_nm"]
 
-    # ---- Pre-fetch weather for baseline waypoints ----
-    baseline_winds = wind_at_points(baseline, date)
-
     # ---- Compute baseline distance ----
     baseline_dist_nm = _route_distance_nm(baseline)
 
-    # ---- Standard route costs (baseline waypoints) ----
-    cost_std_no_wind = 0.0
-    cost_std_with_wind = 0.0
-    for i in range(len(baseline) - 1):
-        a = baseline[i]
-        b = baseline[i + 1]
-        dist = _haversine_nm(a, b)
-        hours = dist / ship_speed_kts
-        bearing = _bearing_seg(a, b)
-        ws_kmh, wd = baseline_winds[i + 1]
-        ws_ms = ws_kmh  # data is already m/s
-        f_no = fuel_without_wingsail(ws_ms, wd, bearing, hours)
-        cost_std_no_wind += f_no
-        f_wi = fuel_with_wind(ws_ms, wd, bearing, hours)
-        cost_std_with_wind += min(f_no, f_wi)
+    # ---- Standard route costs with hourly weather ----
+    cost_std_no_wind, cost_std_with_wind = _baseline_costs(baseline, voyage_datetime, ship_speed_kts)
 
     # ---- A* heuristic cache ----
     goal_coords = (G.nodes[goal_node]["lat"], G.nodes[goal_node]["lon"])
@@ -125,7 +143,6 @@ def optimise(
         current, prev = state
 
         if current == goal_node:
-            # Reconstruct path
             path = []
             tmp_state = state
             while True:
@@ -139,13 +156,9 @@ def optimise(
             path.reverse()
             path_ll = [(G.nodes[n]["lat"], G.nodes[n]["lon"]) for n in path]
             cost_opt = g_score[state]
-
-            # Compute optimised route distance
             opt_dist_nm = _route_distance_nm(path_ll)
 
-            # Apply detour cap if requested
             if max_detour_pct is not None and opt_dist_nm > baseline_dist_nm * (1 + max_detour_pct / 100):
-                # Optimised route is too long — fall back to baseline
                 return baseline, cost_std_no_wind, cost_std_with_wind, cost_std_with_wind, baseline_dist_nm, baseline_dist_nm
 
             return path_ll, cost_std_no_wind, cost_std_with_wind, cost_opt, baseline_dist_nm, opt_dist_nm
@@ -183,15 +196,11 @@ def optimise(
                 f = tentative + h_cache.get(neighbor, 0)
                 heapq.heappush(open_set, (f, next_state))
 
-    # ---- Fallback: if A* exhausts, return baseline as optimised route ----
+    # Fallback: return baseline as optimised route
     cost_baseline_opt = sum(
-        edge_cost(
-            baseline_winds[i + 1][0],
-            baseline_winds[i + 1][1],
-            _bearing_seg(baseline[i], baseline[i + 1]),
-            None,
-            _haversine_nm(baseline[i], baseline[i + 1]) / ship_speed_kts,
-        )
+        edge_cost(*wind_map.get(baseline[i + 1], (0.0, 0.0)),
+                  _bearing_seg(baseline[i], baseline[i + 1]), None,
+                  _haversine_nm(baseline[i], baseline[i + 1]) / ship_speed_kts)
         for i in range(len(baseline) - 1)
     )
     return baseline, cost_std_no_wind, cost_std_with_wind, cost_baseline_opt, baseline_dist_nm, baseline_dist_nm

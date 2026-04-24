@@ -1,7 +1,7 @@
 """FastAPI wrapper around the route optimisation engine."""
 
 import json
-from datetime import date as date_cls, timedelta
+from datetime import date as date_cls, datetime, timedelta
 from pathlib import Path
 from typing import List, Optional, Tuple
 
@@ -15,6 +15,7 @@ from route_opt.baseline import baseline_route as _baseline_route
 from route_opt.mesh import corridor_graph
 from route_opt.optimizer import optimise
 from route_opt.weather_client import preload_year
+from route_opt.hourly_weather import preload_year_hourly
 from route_opt.visualizer import plot_routes
 
 # Global mesh cache: {(start, end) tuple hash: graph}
@@ -80,6 +81,7 @@ def optimize(
     end: str = Query(..., description="End lat,lon or named port"),
     speed: float = Query(default=12.0, ge=1, le=25, description="Ship speed in knots"),
     voyage_date: str = Query(default="2025-06-01", pattern=r"^\d{4}-\d{2}-\d{2}$"),
+    voyage_time: str = Query(default="00:00", pattern=r"^\d{2}:\d{2}$", description="UTC time (HH:MM) — defaults to 00:00"),
     max_detour_pct: Optional[float] = Query(default=None, description="Max route detour as % of baseline distance (e.g. 10 for 10%)"),
     viz: bool = Query(default=False, description="Return Plotly HTML snippet?"),
 ):
@@ -95,9 +97,17 @@ def optimize(
 
     baseline = _baseline_route(start_ll, end_ll)
     G = _graph_for_route(baseline)
+
+    # Parse voyage datetime
+    try:
+        voyage_dt = datetime.strptime(f"{voyage_date} {voyage_time}", "%Y-%m-%d %H:%M")
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"Invalid voyage time: {voyage_time}. Expected HH:MM")
+
     try:
         result_tuple = optimise(
             G, baseline, start_ll, end_ll, voyage_date, speed,
+            voyage_datetime=voyage_dt,
             max_detour_pct=max_detour_pct,
         )
         path, cost_std_no_wind, cost_std_wind, cost_opt, baseline_dist_nm, opt_dist_nm = result_tuple
@@ -149,10 +159,14 @@ def batch_optimise(
     baseline = _baseline_route(start_ll, end_ll)
     G = _graph_for_route(baseline)
 
-    # Pre-load weather
+    # Pre-load weather (daily + hourly)
     mesh_points = [(d["lat"], d["lon"]) for _, d in G.nodes(data=True)]
     all_points = list(set(mesh_points + list(baseline)))
     preload_year(year, sample_points=all_points)
+    try:
+        preload_year_hourly(year, all_points)
+    except FileNotFoundError:
+        pass  # hourly data not available; will fall back to daily
 
     d = date_cls(year, 1, 1)
     total_days = (date_cls(year, 12, 31) - d).days + 1
@@ -160,9 +174,11 @@ def batch_optimise(
 
     for day_num in range(total_days):
         date_str = d.strftime("%Y-%m-%d")
+        voyage_dt = datetime(year, d.month, d.day)
         try:
             result_tuple = optimise(
                 G, baseline, start_ll, end_ll, date_str, speed,
+                voyage_datetime=voyage_dt,
                 max_detour_pct=max_detour_pct,
             )
             path, cost_no, cost_wind, cost_opt, base_dist, opt_dist = result_tuple
@@ -218,10 +234,13 @@ def batch_stream(
     all_points = list(set(mesh_points + list(baseline)))
 
     def generate():
-        # Send pre-load event
         yield f"data: {json.dumps({'type': 'preload', 'year': year})}\n\n"
 
         preload_year(year, sample_points=all_points)
+        try:
+            preload_year_hourly(year, all_points)
+        except FileNotFoundError:
+            pass
 
         yield f"data: {json.dumps({'type': 'preload_done', 'year': year})}\n\n"
 
@@ -230,9 +249,11 @@ def batch_stream(
 
         for day_num in range(total_days):
             date_str = d.strftime("%Y-%m-%d")
+            voyage_dt = datetime(year, d.month, d.day)
             try:
                 result_tuple = optimise(
                     G, baseline, start_ll, end_ll, date_str, speed,
+                    voyage_datetime=voyage_dt,
                     max_detour_pct=max_detour_pct,
                 )
                 path, cost_no, cost_wind, cost_opt, base_dist, opt_dist = result_tuple

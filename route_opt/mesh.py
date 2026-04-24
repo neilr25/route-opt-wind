@@ -156,4 +156,7 @@ def corridor_graph(
                     crosses_land=crosses_land,
                 )
 
+    # Store stage indices on the graph for ETA lookup
+    G.graph["stage_indices"] = stage_indices
+
     return G
