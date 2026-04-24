@@ -99,6 +99,11 @@ def optimize(
         "standard_no_wind_tonnes": round(cost_std_no_wind, 2),
         "standard_with_wind_tonnes": round(cost_std_wind, 2),
         "optimised_with_wind_tonnes": round(cost_opt, 2),
+        "wind_savings_t": round(cost_std_no_wind - cost_std_wind, 2),
+        "optimisation_extra_t": round(cost_std_wind - cost_opt, 2),
+        "total_savings_t": round(cost_std_no_wind - cost_opt, 2),
+        "wind_savings_pct": round((cost_std_no_wind - cost_std_wind) / cost_std_no_wind * 100, 1) if cost_std_no_wind > 0 else 0,
+        "total_savings_pct": round((cost_std_no_wind - cost_opt) / cost_std_no_wind * 100, 1) if cost_std_no_wind > 0 else 0,
         "baseline_distance_nm": round(baseline_dist_nm, 1),
         "optimised_distance_nm": round(opt_dist_nm, 1),
         "detour_pct": round(detour_pct, 1),
@@ -116,10 +121,11 @@ def batch_optimise(
     start: str = Query(default="ROTTERDAM"),
     end: str = Query(default="NEW YORK"),
     speed: float = Query(default=12.0, ge=1, le=25),
-    year: int = Query(default=2025),
+    start_date: str = Query(default="2025-01-01", pattern=r"^\d{4}-\d{2}-\d{2}$"),
+    end_date: str = Query(default="2025-12-31", pattern=r"^\d{4}-\d{2}-\d{2}$"),
     max_detour_pct: Optional[float] = Query(default=None),
 ):
-    """Run batch optimisation for a full year. Returns JSON array of results."""
+    """Run batch optimisation for a date range. Returns JSON array of results."""
     try:
         start_ll = _parse_ll(start)
     except ValueError:
@@ -132,6 +138,15 @@ def batch_optimise(
     baseline = _baseline_route(start_ll, end_ll)
     G = _graph_for_route(baseline)
 
+    # Parse date range
+    try:
+        d = date_cls.fromisoformat(start_date)
+        end_d = date_cls.fromisoformat(end_date)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD")
+
+    year = d.year
+
     # Pre-load weather (daily + hourly)
     mesh_points = [(d["lat"], d["lon"]) for _, d in G.nodes(data=True)]
     all_points = list(set(mesh_points + list(baseline)))
@@ -139,15 +154,14 @@ def batch_optimise(
     try:
         preload_year_hourly(year, all_points)
     except FileNotFoundError:
-        pass  # hourly data not available; will fall back to daily
+        pass
 
-    d = date_cls(year, 1, 1)
-    total_days = (date_cls(year, 12, 31) - d).days + 1
+    total_days = (end_d - d).days + 1
     records = []
 
     for day_num in range(total_days):
         date_str = d.strftime("%Y-%m-%d")
-        voyage_dt = datetime(year, d.month, d.day)
+        voyage_dt = datetime(d.year, d.month, d.day)
         try:
             result_tuple = optimise(
                 G, baseline, start_ll, end_ll, date_str, speed,
@@ -157,6 +171,8 @@ def batch_optimise(
             path, cost_no, cost_wind, cost_opt, base_dist, opt_dist = result_tuple
             savings_std = cost_no - cost_wind
             savings_opt = cost_wind - cost_opt
+            wind_savings_pct = (savings_std / cost_no * 100) if cost_no > 0 else 0
+            total_savings_pct = ((cost_no - cost_opt) / cost_no * 100) if cost_no > 0 else 0
             detour_pct = ((opt_dist - base_dist) / base_dist * 100) if base_dist > 0 else 0
             detour_hours = (opt_dist - base_dist) / speed if opt_dist > base_dist else 0
             records.append({
@@ -167,6 +183,8 @@ def batch_optimise(
                 "wind_savings_t": round(savings_std, 2),
                 "optimisation_extra_t": round(savings_opt, 2),
                 "total_savings_t": round(savings_std + savings_opt, 2),
+                "wind_savings_pct": round(wind_savings_pct, 1),
+                "total_savings_pct": round(total_savings_pct, 1),
                 "baseline_distance_nm": round(base_dist, 1),
                 "optimised_distance_nm": round(opt_dist, 1),
                 "detour_pct": round(detour_pct, 1),
@@ -187,7 +205,8 @@ def batch_stream(
     start: str = Query(default="ROTTERDAM"),
     end: str = Query(default="NEW YORK"),
     speed: float = Query(default=12.0, ge=1, le=25),
-    year: int = Query(default=2025),
+    start_date: str = Query(default="2025-01-01", pattern=r"^\d{4}-\d{2}-\d{2}$"),
+    end_date: str = Query(default="2025-12-31", pattern=r"^\d{4}-\d{2}-\d{2}$"),
     max_detour_pct: Optional[float] = Query(default=None),
 ):
     """Stream batch results via Server-Sent Events (SSE)."""
@@ -203,11 +222,20 @@ def batch_stream(
     baseline = _baseline_route(start_ll, end_ll)
     G = _graph_for_route(baseline)
 
+    try:
+        d = date_cls.fromisoformat(start_date)
+        end_d = date_cls.fromisoformat(end_date)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD")
+
+    year = d.year
+    total_days = (end_d - d).days + 1
+
     mesh_points = [(d["lat"], d["lon"]) for _, d in G.nodes(data=True)]
     all_points = list(set(mesh_points + list(baseline)))
 
     def generate():
-        yield f"data: {json.dumps({'type': 'preload', 'year': year})}\n\n"
+        yield f"data: {json.dumps({'type': 'preload', 'total': total_days, 'start': start_date, 'end': end_date})}\n\n"
 
         preload_year(year, sample_points=all_points)
         try:
@@ -215,14 +243,11 @@ def batch_stream(
         except FileNotFoundError:
             pass
 
-        yield f"data: {json.dumps({'type': 'preload_done', 'year': year})}\n\n"
-
-        d = date_cls(year, 1, 1)
-        total_days = (date_cls(year, 12, 31) - d).days + 1
+        yield f"data: {json.dumps({'type': 'preload_done', 'total': total_days})}\n\n"
 
         for day_num in range(total_days):
             date_str = d.strftime("%Y-%m-%d")
-            voyage_dt = datetime(year, d.month, d.day)
+            voyage_dt = datetime(d.year, d.month, d.day)
             try:
                 result_tuple = optimise(
                     G, baseline, start_ll, end_ll, date_str, speed,
@@ -242,8 +267,11 @@ def batch_stream(
                     "standard_no_wind_t": round(cost_no, 2),
                     "standard_with_wind_t": round(cost_wind, 2),
                     "optimised_with_wind_t": round(cost_opt, 2),
-                    "wind_savings_t": round(savings_std, 2),
-                    "optimisation_extra_t": round(savings_opt, 2),
+                    "wind_savings_t": round(cost_no - cost_wind, 2),
+                    "optimisation_extra_t": round(cost_wind - cost_opt, 2),
+                    "total_savings_t": round(cost_no - cost_opt, 2),
+                    "wind_savings_pct": round((cost_no - cost_wind) / cost_no * 100, 1) if cost_no > 0 else 0,
+                    "total_savings_pct": round((cost_no - cost_opt) / cost_no * 100, 1) if cost_no > 0 else 0,
                     "baseline_distance_nm": round(base_dist, 1),
                     "optimised_distance_nm": round(opt_dist, 1),
                     "detour_pct": round(detour_pct, 1),

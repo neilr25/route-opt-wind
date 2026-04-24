@@ -162,6 +162,12 @@ input[type=date],input[type=number],input[type=text],select{box-sizing:border-bo
             $('statsPanel').style.display = '';
 
             // Results table
+            const windSavingsT = data.wind_savings_t ?? (data.standard_no_wind_tonnes - data.standard_with_wind_tonnes);
+            const optExtraT = data.optimisation_extra_t ?? (data.standard_with_wind_tonnes - data.optimised_with_wind_tonnes);
+            const totalSavingsT = data.total_savings_t ?? (data.standard_no_wind_tonnes - data.optimised_with_wind_tonnes);
+            const windSavingsPct = data.wind_savings_pct ?? ((data.standard_no_wind_tonnes - data.standard_with_wind_tonnes) / data.standard_no_wind_tonnes * 100);
+            const totalSavingsPct = data.total_savings_pct ?? ((data.standard_no_wind_tonnes - data.optimised_with_wind_tonnes) / data.standard_no_wind_tonnes * 100);
+
             $('results').innerHTML = `
                 <div class="results panel">
                     <h3>Fuel results</h3>
@@ -170,8 +176,9 @@ input[type=date],input[type=number],input[type=text],select{box-sizing:border-bo
                         <tr><td>Standard (no wind)</td><td class="num red">${data.standard_no_wind_tonnes} t</td></tr>
                         <tr><td>Standard (with wind)</td><td class="num">${data.standard_with_wind_tonnes} t</td></tr>
                         <tr><td>Optimised (with wind)</td><td class="num green"><strong>${data.optimised_with_wind_tonnes} t</strong></td></tr>
-                        <tr><td>Wind savings</td><td class="num">${(data.standard_no_wind_tonnes - data.standard_with_wind_tonnes).toFixed(2)} t</td></tr>
-                        <tr><td>Optimisation extra savings</td><td class="num green"><strong>${(data.standard_with_wind_tonnes - data.optimised_with_wind_tonnes).toFixed(2)} t</strong></td></tr>
+                        <tr><td>Wind savings</td><td class="num">${windSavingsT.toFixed(2)} t (${windSavingsPct.toFixed(1)}%)</td></tr>
+                        <tr><td>Optimisation extra savings</td><td class="num green"><strong>${optExtraT.toFixed(2)} t</strong></td></tr>
+                        <tr><td>Total savings</td><td class="num green"><strong>${totalSavingsT.toFixed(2)} t (${totalSavingsPct.toFixed(1)}%)</strong></td></tr>
                         <tr><td>Baseline distance</td><td class="num">${baseDist} nm</td></tr>
                         <tr><td>Optimised distance</td><td class="num">${optDist} nm</td></tr>
                         <tr><td>Detour %</td><td class="num">${detourPct}%</td></tr>
@@ -389,7 +396,7 @@ input[type=date],input[type=number],input[type=text],select{box-sizing:border-bo
         try {
             const controller = new AbortController();
             const year = batchStart.substring(0, 4);
-            const r = await fetch(`/batch_stream?start=${encodeURIComponent(start)}&end=${encodeURIComponent(end)}&speed=${speed}&year=${year}`, {
+            const r = await fetch(`/batch_stream?start=${encodeURIComponent(start)}&end=${encodeURIComponent(end)}&speed=${speed}&start_date=${batchStart}&end_date=${batchEnd}`, {
                 signal: controller.signal
             });
             const reader = r.body.getReader();
@@ -453,9 +460,9 @@ input[type=date],input[type=number],input[type=text],select{box-sizing:border-bo
 <div class="results panel">
 <h3>Batch results (${records.length} days)</h3>
 <table id="batchTable">
-<tr><th>Date</th><th class="num">Std (no wind) t</th><th class="num">Std (wind) t</th><th class="num">Optimised t</th><th class="num">Wind sav t</th><th class="num">Opt sav t</th><th class="num">Base dist nm</th><th class="num">Opt dist nm</th><th class="num">Detour %</th><th class="num">Detour h</th></tr>` +
+<tr><th>Date</th><th class="num">Std (no wind) t</th><th class="num">Std (wind) t</th><th class="num">Optimised t</th><th class="num">Wind sav %</th><th class="num">Total sav %</th><th class="num">Base dist nm</th><th class="num">Opt dist nm</th><th class="num">Detour %</th><th class="num">Detour h</th></tr>` +
 records.map(r => r.error ? `<tr data-date="${r.date}"><td><a href="javascript:void(0)" class="date-link" data-date="${r.date}">${r.date}</a></td><td colspan="9" class="red">Error: ${r.error}</td></tr>` :
-`<tr data-date="${r.date}"><td><a href="javascript:void(0)" class="date-link" data-date="${r.date}">${r.date}</a></td><td class="num">${r.standard_no_wind_t}</td><td class="num">${r.standard_with_wind_t}</td><td class="num green"><strong>${r.optimised_with_wind_t}</strong></td><td class="num">${r.wind_savings_t}</td><td class="num green"><strong>${r.optimisation_extra_t}</strong></td><td class="num">${r.baseline_distance_nm}</td><td class="num">${r.optimised_distance_nm}</td><td class="num">${r.detour_pct}</td><td class="num">${r.detour_hours}</td></tr>`
+`<tr data-date="${r.date}"><td><a href="javascript:void(0)" class="date-link" data-date="${r.date}">${r.date}</a></td><td class="num">${r.standard_no_wind_t}</td><td class="num">${r.standard_with_wind_t}</td><td class="num green"><strong>${r.optimised_with_wind_t}</strong></td><td class="num">${r.wind_savings_pct}%</td><td class="num green"><strong>${r.total_savings_pct}%</strong></td><td class="num">${r.baseline_distance_nm}</td><td class="num">${r.optimised_distance_nm}</td><td class="num">${r.detour_pct}</td><td class="num">${r.detour_hours}</td></tr>`
 ).join('') + `</table></div>`;
 
         } catch (e) {
