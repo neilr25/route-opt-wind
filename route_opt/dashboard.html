@@ -46,6 +46,11 @@ input[type=date],input[type=number],input[type=text],select{box-sizing:border-bo
 .date-link.loading{color:#666;text-decoration:none;cursor:default}
 @keyframes rowFlash{0%{background:#dbe9ff}100%{background:transparent}}
 .row-flash{animation:rowFlash 1.2s ease-out}
+.adv-toggle{font-size:12px;color:#0052cc;cursor:pointer;text-decoration:underline;margin-top:6px;display:inline-block}
+.adv-toggle:hover{color:#003d99}
+.adv-section{margin-top:8px;padding-top:8px;border-top:1px solid #eee;display:none}
+.adv-section.open{display:flex}
+.adv-section .row{margin:0}
 </style>
 </head>
 <body>
@@ -57,10 +62,27 @@ input[type=date],input[type=number],input[type=text],select{box-sizing:border-bo
 <div class="row">
 <div><label for="start">Start (port or lat,lon)</label><input id="start" value="ROTTERDAM" placeholder="ROTTERDAM"></div>
 <div><label for="end">End (port or lat,lon)</label><input id="end" value="NEW YORK" placeholder="NEW YORK"></div>
-<div><label for="date">Date</label><input id="date" type="date" value="2025-06-01"></div>
+<div><label for="date">Date</label><input id="date" type="date" value="2025-06-01"><br><label for="voyageTime">Time (UTC)</label><select id="voyageTime" style="width:70px"><option value="00:00">00:00</option><option value="06:00">06:00</option><option value="12:00" selected>12:00</option><option value="18:00">18:00</option></select></div>
 <div><label for="speed">Speed (kts)</label><input id="speed" type="number" value="12" min="1" max="25" style="width:80px"></div>
 <div><label for="maxDetour">Max detour %</label><input id="maxDetour" type="number" value="" min="0" max="50" step="1" placeholder="None" style="width:80px"></div>
-<div><br><button id="go" onclick="run()">Analyse</button></div>
+<div>
+  <label for="weatherMode">Weather</label>
+  <select id="weatherMode" style="width:110px">
+    <option value="hourly" selected>Hourly</option>
+    <option value="daily">Daily</option>
+  </select>
+</div>
+<div style="display:flex;align-items:center;gap:5px;padding-top:18px">
+  <input type="checkbox" id="useCurrents" checked>
+  <label for="useCurrents" style="font-size:13px;cursor:pointer">Ocean currents</label>
+</div>
+<div><br><button id="go" onclick="run()">Analyse</button> <button class="secondary" onclick="reverseRoute()" title="Swap start and end ports">⇄ Reverse</button></div>
+</div>
+<span class="adv-toggle" onclick="toggleAdvanced()">▼ Advanced corridor settings</span>
+<div id="advSection" class="adv-section row">
+  <div><label for="corridorWidth">Corridor width (nm)</label><input id="corridorWidth" type="number" value="200" min="50" max="500" step="10" style="width:90px"></div>
+  <div><label for="laneSpacing">Lane spacing (nm)</label><input id="laneSpacing" type="number" value="25" min="10" max="100" step="5" style="width:90px"></div>
+  <div><label for="stageSkip">Stage skip</label><input id="stageSkip" type="number" value="4" min="2" max="10" step="1" style="width:70px"></div>
 </div>
 
 <!-- Batch panel -->
@@ -82,6 +104,8 @@ input[type=date],input[type=number],input[type=text],select{box-sizing:border-bo
 <div class="layer-toggles">
 <label><input type="checkbox" id="layerBase" checked> Baseline route</label>
 <label><input type="checkbox" id="layerOpt" checked> Optimised route</label>
+<label><input type="checkbox" id="layerOptSegments" checked> Route segments (tooltips)</label>
+<label><input type="checkbox" id="layerBaseSegments" checked> Baseline segments (tooltips)</label>
 <label><input type="checkbox" id="layerMeshEdges"> Mesh edges</label>
 <label><input type="checkbox" id="layerMeshNodes"> Mesh nodes</label>
 </div>
@@ -129,6 +153,7 @@ input[type=date],input[type=number],input[type=text],select{box-sizing:border-bo
         const date = $('date').value;
         const speed = $('speed').value;
         const maxDetour = $('maxDetour').value;
+        const weatherMode = $('weatherMode').value; // hourly | daily
         _lastStart = start;
         _lastEnd = end;
         _lastSpeed = speed;
@@ -136,8 +161,14 @@ input[type=date],input[type=number],input[type=text],select{box-sizing:border-bo
         try {
             const controller = new AbortController();
             const timeoutId = setTimeout(() => controller.abort(), 120000);
-            let url = `/optimize?start=${encodeURIComponent(start)}&end=${encodeURIComponent(end)}&voyage_date=${date}&speed=${speed}`;
+            let url = `/optimize?start=${encodeURIComponent(start)}&end=${encodeURIComponent(end)}&voyage_date=${date}&voyage_time=${$('voyageTime').value}&speed=${speed}&use_hourly=${weatherMode === 'hourly'}&use_currents=${$('useCurrents').checked}`;
             if (maxDetour) url += `&max_detour_pct=${encodeURIComponent(maxDetour)}`;
+            const cw = $('corridorWidth').value;
+            const ls = $('laneSpacing').value;
+            const ss = $('stageSkip').value;
+            if (cw && cw !== '200') url += `&corridor_width_nm=${cw}`;
+            if (ls && ls !== '25') url += `&lane_spacing_nm=${ls}`;
+            if (ss && ss !== '4') url += `&stage_skip=${ss}`;
             const r = await fetch(url, { signal: controller.signal });
             clearTimeout(timeoutId);
 
@@ -204,10 +235,6 @@ input[type=date],input[type=number],input[type=text],select{box-sizing:border-bo
                 const baseLine = data.baseline_route.map(p => [p[0], p[1]]);
                 _layers.base = L.polyline(baseLine, {color: '#EF553B', weight: 3, opacity: 0.8}).addTo(_map).bindPopup('Baseline route');
             }
-            if (data.optimised_route && data.optimised_route.length > 1) {
-                const optLine = data.optimised_route.map(p => [p[0], p[1]]);
-                _layers.opt = L.polyline(optLine, {color: '#00CC96', weight: 4, opacity: 0.9}).addTo(_map).bindPopup('Optimised route');
-            }
 
             // Mesh overlay
             if (data.mesh) {
@@ -230,8 +257,8 @@ input[type=date],input[type=number],input[type=text],select{box-sizing:border-bo
                         `Crosses land: ${e.crosses_land ? '<strong style="color:red">YES</strong>' : 'No'}<br>` +
                         `Start: ${u.lat.toFixed(4)}, ${u.lon.toFixed(4)}<br>` +
                         `End: ${v.lat.toFixed(4)}, ${v.lon.toFixed(4)}`;
-                    const pl = L.polyline(line, {color: e.crosses_land ? 'red' : '#999', weight: e.crosses_land ? 2 : 0.5, opacity: 0.8})
-                     .bindTooltip(popupContent, {sticky: true});
+                    const pl = L.polyline(line, {color: e.crosses_land ? 'red' : '#999', weight: e.crosses_land ? 2.5 : 2, opacity: e.crosses_land ? 0.9 : 0.6})
+                     .bindTooltip(popupContent, {sticky: true, interactive: true});
                     _layers.meshEdges.addLayer(pl);
                 });
                 if (!$('layerMeshEdges').checked) _map.removeLayer(_layers.meshEdges);
@@ -248,6 +275,46 @@ input[type=date],input[type=number],input[type=text],select{box-sizing:border-bo
                     _layers.meshNodes.addLayer(cm);
                 });
                 if (!$('layerMeshNodes').checked) _map.removeLayer(_layers.meshNodes);
+            }
+
+            // Optimised route edge tooltips
+            if (data.edge_meta && data.edge_meta.length > 0) {
+                _layers.optSegments = L.layerGroup().addTo(_map);
+                data.edge_meta.forEach((meta, i) => {
+                    const line = [[meta.from_lat, meta.from_lon], [meta.to_lat, meta.to_lon]];
+                    const etaStr = meta.eta ? new Date(meta.eta).toISOString().slice(0,16).replace('T',' ') + ' UTC' : 'N/A';
+                    const currentLine = meta.current_speed_ms ? `Current: ${meta.current_speed_ms} m/s (U: ${meta.current_u_ms}, V: ${meta.current_v_ms}) m/s<br>` : '';
+                    const popupContent = `<b>Optimised segment ${i+1}/${data.edge_meta.length}</b><br>` +
+                        `ETA: ${etaStr}<br>` +
+                        `Heading: ${meta.bearing}°<br>` +
+                        `Wind: ${meta.wind_speed_ms} m/s from ${meta.wind_direction_deg}° (TWA ${meta.twa_deg !== undefined ? meta.twa_deg : 'N/A'}°)<br>` +
+                        currentLine +
+                        `Distance: ${meta.distance_nm} nm<br>` +
+                        `Fuel: ${meta.fuel_tonnes} t`;
+                    const pl = L.polyline(line, {color: '#00CC96', weight: 4, opacity: 0.9})
+                        .bindTooltip(popupContent, {sticky: true});
+                    _layers.optSegments.addLayer(pl);
+                });
+            }
+
+            // Baseline route edge tooltips
+            if (data.baseline_edge_meta && data.baseline_edge_meta.length > 0) {
+                _layers.baseSegments = L.layerGroup().addTo(_map);
+                data.baseline_edge_meta.forEach((meta, i) => {
+                    const line = [[meta.from_lat, meta.from_lon], [meta.to_lat, meta.to_lon]];
+                    const etaStr = meta.eta ? new Date(meta.eta).toISOString().slice(0,16).replace('T',' ') + ' UTC' : 'N/A';
+                    const currentLine = meta.current_speed_ms ? `Current: ${meta.current_speed_ms} m/s (U: ${meta.current_u_ms}, V: ${meta.current_v_ms}) m/s<br>` : '';
+                    const popupContent = `<b>Baseline segment ${i+1}/${data.baseline_edge_meta.length}</b><br>` +
+                        `ETA: ${etaStr}<br>` +
+                        `Heading: ${meta.bearing}°<br>` +
+                        `Wind: ${meta.wind_speed_ms} m/s from ${meta.wind_direction_deg}° (TWA ${meta.twa_deg !== undefined ? meta.twa_deg : 'N/A'}°)<br>` +
+                        currentLine +
+                        `Distance: ${meta.distance_nm} nm<br>` +
+                        `Fuel: ${meta.fuel_tonnes} t`;
+                    const pl = L.polyline(line, {color: '#EF553B', weight: 4, opacity: 0.9, dashArray: '5,5'})
+                        .bindTooltip(popupContent, {sticky: true});
+                    _layers.baseSegments.addLayer(pl);
+                });
             }
 
             const allPts = (data.baseline_route || []).concat(data.optimised_route || []);
@@ -276,17 +343,18 @@ input[type=date],input[type=number],input[type=text],select{box-sizing:border-bo
         };
         setLayer('base', $('layerBase'));
         setLayer('opt', $('layerOpt'));
+        setLayer('optSegments', $('layerOptSegments'));
+        setLayer('baseSegments', $('layerBaseSegments'));
         setLayer('meshEdges', $('layerMeshEdges'));
         setLayer('meshNodes', $('layerMeshNodes'));
     }
 
-    ['layerBase','layerOpt','layerMeshEdges','layerMeshNodes'].forEach(id => {
+    ['layerBase','layerOpt','layerOptSegments','layerBaseSegments','layerMeshEdges','layerMeshNodes'].forEach(id => {
         $(id).addEventListener('change', toggleLayers);
     });
 
-    // Click handler for batch table date links
     function clearRouteLayers() {
-        ['base', 'opt'].forEach(k => {
+        ['base', 'opt', 'optSegments', 'baseSegments'].forEach(k => {
             if (_layers[k] && _map) {
                 _map.removeLayer(_layers[k]);
                 delete _layers[k];
@@ -302,6 +370,43 @@ input[type=date],input[type=number],input[type=text],select{box-sizing:border-bo
         if (data.optimised_route && data.optimised_route.length > 1) {
             const optLine = data.optimised_route.map(p => [p[0], p[1]]);
             _layers.opt = L.polyline(optLine, {color: '#00CC96', weight: 4, opacity: 0.9}).addTo(_map).bindPopup('Optimised route');
+        }
+        // Re-draw segment tooltips for batch date clicks
+        if (data.edge_meta && data.edge_meta.length > 0) {
+            _layers.optSegments = L.layerGroup().addTo(_map);
+            data.edge_meta.forEach((meta, i) => {
+                const line = [[meta.from_lat, meta.from_lon], [meta.to_lat, meta.to_lon]];
+                const etaStr = meta.eta ? new Date(meta.eta).toISOString().slice(0,16).replace('T',' ') + ' UTC' : 'N/A';
+                const currentLine = meta.current_speed_ms ? `Current: ${meta.current_speed_ms} m/s (U: ${meta.current_u_ms}, V: ${meta.current_v_ms}) m/s<br>` : '';
+                const popupContent = `<b>Optimised segment ${i+1}/${data.edge_meta.length}</b><br>` +
+                    `ETA: ${etaStr}<br>` +
+                    `Heading: ${meta.bearing}°<br>` +
+                    `Wind: ${meta.wind_speed_ms} m/s from ${meta.wind_direction_deg}° (TWA ${meta.twa_deg !== undefined ? meta.twa_deg : 'N/A'}°)<br>` +
+                    currentLine +
+                    `Distance: ${meta.distance_nm} nm<br>` +
+                    `Fuel: ${meta.fuel_tonnes} t`;
+                const pl = L.polyline(line, {color: '#00CC96', weight: 4, opacity: 0.9})
+                    .bindTooltip(popupContent, {sticky: true});
+                _layers.optSegments.addLayer(pl);
+            });
+        }
+        if (data.baseline_edge_meta && data.baseline_edge_meta.length > 0) {
+            _layers.baseSegments = L.layerGroup().addTo(_map);
+            data.baseline_edge_meta.forEach((meta, i) => {
+                const line = [[meta.from_lat, meta.from_lon], [meta.to_lat, meta.to_lon]];
+                const etaStr = meta.eta ? new Date(meta.eta).toISOString().slice(0,16).replace('T',' ') + ' UTC' : 'N/A';
+                const currentLine = meta.current_speed_ms ? `Current: ${meta.current_speed_ms} m/s (U: ${meta.current_u_ms}, V: ${meta.current_v_ms}) m/s<br>` : '';
+                const popupContent = `<b>Baseline segment ${i+1}/${data.baseline_edge_meta.length}</b><br>` +
+                    `ETA: ${etaStr}<br>` +
+                    `Heading: ${meta.bearing}°<br>` +
+                    `Wind: ${meta.wind_speed_ms} m/s from ${meta.wind_direction_deg}° (TWA ${meta.twa_deg !== undefined ? meta.twa_deg : 'N/A'}°)<br>` +
+                    currentLine +
+                    `Distance: ${meta.distance_nm} nm<br>` +
+                    `Fuel: ${meta.fuel_tonnes} t`;
+                const pl = L.polyline(line, {color: '#EF553B', weight: 4, opacity: 0.9, dashArray: '5,5'})
+                    .bindTooltip(popupContent, {sticky: true});
+                _layers.baseSegments.addLayer(pl);
+            });
         }
         toggleLayers();
     }
@@ -352,7 +457,13 @@ input[type=date],input[type=number],input[type=text],select{box-sizing:border-bo
         const originalText = link.textContent;
         link.textContent = 'Loading route…';
 
-        let url = `/optimize?start=${encodeURIComponent(_lastStart)}&end=${encodeURIComponent(_lastEnd)}&voyage_date=${date}&speed=${_lastSpeed}`;
+        let url = `/optimize?start=${encodeURIComponent(_lastStart)}&end=${encodeURIComponent(_lastEnd)}&voyage_date=${date}&voyage_time=${$('voyageTime').value}&speed=${_lastSpeed}&use_hourly=${$('weatherMode').value === 'hourly'}&use_currents=${$('useCurrents').checked}`;
+        const cw = $('corridorWidth').value;
+        const ls = $('laneSpacing').value;
+        const ss = $('stageSkip').value;
+        if (cw && cw !== '200') url += `&corridor_width_nm=${cw}`;
+        if (ls && ls !== '25') url += `&lane_spacing_nm=${ls}`;
+        if (ss && ss !== '4') url += `&stage_skip=${ss}`;
         try {
             const controller = new AbortController();
             const timeoutId = setTimeout(() => controller.abort(), 120000);
@@ -383,6 +494,7 @@ input[type=date],input[type=number],input[type=text],select{box-sizing:border-bo
         const speed = $('speed').value;
         const batchStart = $('batchStart').value;
         const batchEnd = $('batchEnd').value;
+        const weatherMode = $('weatherMode').value;
         _lastStart = start;
         _lastEnd = end;
         _lastSpeed = speed;
@@ -396,7 +508,7 @@ input[type=date],input[type=number],input[type=text],select{box-sizing:border-bo
         try {
             const controller = new AbortController();
             const year = batchStart.substring(0, 4);
-            const r = await fetch(`/batch_stream?start=${encodeURIComponent(start)}&end=${encodeURIComponent(end)}&speed=${speed}&start_date=${batchStart}&end_date=${batchEnd}`, {
+            const r = await fetch(`/batch_stream?start=${encodeURIComponent(start)}&end=${encodeURIComponent(end)}&speed=${speed}&start_date=${batchStart}&end_date=${batchEnd}&use_hourly=${weatherMode === 'hourly'}`, {
                 signal: controller.signal
             });
             const reader = r.body.getReader();
@@ -472,6 +584,25 @@ records.map(r => r.error ? `<tr data-date="${r.date}"><td><a href="javascript:vo
             setTimeout(() => { $('batchProgressWrap').style.display = 'none'; }, 3000);
         }
     }
-</script>
+function reverseRoute() {
+        const startEl = $('start');
+        const endEl = $('end');
+        const tmp = startEl.value;
+        startEl.value = endEl.value;
+        endEl.value = tmp;
+    }
+
+    function toggleAdvanced() {
+        const section = $('advSection');
+        const toggle = document.querySelector('.adv-toggle');
+        if (section.classList.contains('open')) {
+            section.classList.remove('open');
+            toggle.textContent = '▼ Advanced corridor settings';
+        } else {
+            section.classList.add('open');
+            toggle.textContent = '▲ Advanced corridor settings';
+        }
+    }
+    </script>
 </body>
 </html>

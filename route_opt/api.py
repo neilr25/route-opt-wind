@@ -12,25 +12,17 @@ import networkx as nx
 import pandas as pd
 
 from route_opt.baseline import baseline_route as _baseline_route
-from route_opt.mesh import corridor_graph
+from route_opt.mesh import corridor_graph as _graph_for_route
 from route_opt.optimizer import optimise
 from route_opt.weather_client import preload_year
 from route_opt.hourly_weather import preload_year_hourly, wind_at_points_hourly
 from route_opt.visualizer import plot_routes
 from route_opt.api_helpers import _serialize_mesh, _parse_ll, _named_port
+from route_opt.weather_api import router as weather_router
 
-# Global mesh cache: {(start, end) tuple hash: graph}
-_mesh_cache: dict[int, nx.DiGraph] = {}
-
-def _graph_for_route(baseline: List[Tuple[float, float]]) -> nx.DiGraph:
-    key = hash(tuple(baseline))
-    if key in _mesh_cache:
-        return _mesh_cache[key]
-    G = corridor_graph(baseline)
-    _mesh_cache[key] = G
-    return G
 
 app = FastAPI(title="SGS Route Optimiser", version="1.0.0")
+app.include_router(weather_router)
 
 _DASHBOARD_PATH = Path(__file__).resolve().parent / "dashboard.html"
 
@@ -54,9 +46,14 @@ def optimize(
     end: str = Query(..., description="End lat,lon or named port"),
     speed: float = Query(default=12.0, ge=1, le=25, description="Ship speed in knots"),
     voyage_date: str = Query(default="2025-06-01", pattern=r"^\d{4}-\d{2}-\d{2}$"),
-    voyage_time: str = Query(default="00:00", pattern=r"^\d{2}:\d{2}$", description="UTC time (HH:MM) — defaults to 00:00"),
+    voyage_time: str = Query(default="12:00", pattern=r"^\d{2}:\d{2}$", description="UTC time (HH:MM) — defaults to 12:00 UTC (matches daily ERA5 snapshot)"),
     max_detour_pct: Optional[float] = Query(default=None, description="Max route detour as % of baseline distance (e.g. 10 for 10%)"),
     viz: bool = Query(default=False, description="Return Plotly HTML snippet?"),
+    use_hourly: bool = Query(default=True, description="Use hourly ERA5 weather (default true). Set false for daily snapshots only."),
+    use_currents: bool = Query(default=True, description="Include ocean current effects on speed-over-ground (default true). Set false for wind-only routing."),
+    corridor_width_nm: Optional[float] = Query(default=None, description="Corridor width in nm (default 200)"),
+    lane_spacing_nm: Optional[float] = Query(default=None, description="Lane spacing in nm (default 25)"),
+    stage_skip: Optional[int] = Query(default=None, description="Stage skip — connect every Nth waypoint (default 4)"),
 ):
     """Run optimisation and return baseline + optimised routes with fuel estimates."""
     try:
@@ -71,6 +68,17 @@ def optimize(
     baseline = _baseline_route(start_ll, end_ll)
     G = _graph_for_route(baseline)
 
+    # Override corridor config if specified
+    if corridor_width_nm is not None or lane_spacing_nm is not None or stage_skip is not None:
+        from route_opt.config import CORRIDOR_WIDTH_NM as _CW, LANE_SPACING_NM as _LS, STAGE_SKIP as _SS
+        from route_opt.mesh import corridor_graph as _corridor_graph_fn
+        G = _corridor_graph_fn(
+            baseline,
+            width_nm=corridor_width_nm if corridor_width_nm is not None else _CW,
+            lane_spacing_nm=lane_spacing_nm if lane_spacing_nm is not None else _LS,
+            stage_skip=stage_skip if stage_skip is not None else _SS,
+        )
+
     # Parse voyage datetime
     try:
         voyage_dt = datetime.strptime(f"{voyage_date} {voyage_time}", "%Y-%m-%d %H:%M")
@@ -82,8 +90,10 @@ def optimize(
             G, baseline, start_ll, end_ll, voyage_date, speed,
             voyage_datetime=voyage_dt,
             max_detour_pct=max_detour_pct,
+            use_hourly=use_hourly,
+            use_currents=use_currents,
         )
-        path, cost_std_no_wind, cost_std_wind, cost_opt, baseline_dist_nm, opt_dist_nm = result_tuple
+        path, cost_std_no_wind, cost_std_wind, cost_opt, baseline_dist_nm, opt_dist_nm, edge_meta, baseline_edge_meta = result_tuple
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Optimisation failed: {exc}")
 
@@ -110,7 +120,10 @@ def optimize(
         "detour_hours": round(detour_hours, 1),
         "baseline_hours": round(baseline_hours, 1),
         "optimised_hours": round(opt_hours, 1),
+        "use_currents": use_currents,
         "mesh": _serialize_mesh(G),
+        "edge_meta": edge_meta,
+        "baseline_edge_meta": baseline_edge_meta,
     }
 
     return result
@@ -124,6 +137,7 @@ def batch_optimise(
     start_date: str = Query(default="2025-01-01", pattern=r"^\d{4}-\d{2}-\d{2}$"),
     end_date: str = Query(default="2025-12-31", pattern=r"^\d{4}-\d{2}-\d{2}$"),
     max_detour_pct: Optional[float] = Query(default=None),
+    use_hourly: bool = Query(default=True, description="Use hourly ERA5 weather (default true)"),
 ):
     """Run batch optimisation for a date range. Returns JSON array of results."""
     try:
@@ -161,14 +175,15 @@ def batch_optimise(
 
     for day_num in range(total_days):
         date_str = d.strftime("%Y-%m-%d")
-        voyage_dt = datetime(d.year, d.month, d.day)
+        voyage_dt = datetime(d.year, d.month, d.day, 12, 0)
         try:
             result_tuple = optimise(
                 G, baseline, start_ll, end_ll, date_str, speed,
                 voyage_datetime=voyage_dt,
                 max_detour_pct=max_detour_pct,
+                use_hourly=True,
             )
-            path, cost_no, cost_wind, cost_opt, base_dist, opt_dist = result_tuple
+            path, cost_no, cost_wind, cost_opt, base_dist, opt_dist, _, _ = result_tuple
             savings_std = cost_no - cost_wind
             savings_opt = cost_wind - cost_opt
             wind_savings_pct = (savings_std / cost_no * 100) if cost_no > 0 else 0
@@ -208,6 +223,7 @@ def batch_stream(
     start_date: str = Query(default="2025-01-01", pattern=r"^\d{4}-\d{2}-\d{2}$"),
     end_date: str = Query(default="2025-12-31", pattern=r"^\d{4}-\d{2}-\d{2}$"),
     max_detour_pct: Optional[float] = Query(default=None),
+    use_hourly: bool = Query(default=True, description="Use hourly ERA5 weather (default true)"),
 ):
     """Stream batch results via Server-Sent Events (SSE)."""
     try:
@@ -249,13 +265,14 @@ def batch_stream(
             try:
                 current_date = d + timedelta(days=day_num)
                 date_str = current_date.strftime("%Y-%m-%d")
-                voyage_dt = datetime(current_date.year, current_date.month, current_date.day)
+                voyage_dt = datetime(current_date.year, current_date.month, current_date.day, 12, 0)
                 result_tuple = optimise(
                     G, baseline, start_ll, end_ll, date_str, speed,
                     voyage_datetime=voyage_dt,
                     max_detour_pct=max_detour_pct,
+                    use_hourly=True,
                 )
-                path, cost_no, cost_wind, cost_opt, base_dist, opt_dist = result_tuple
+                path, cost_no, cost_wind, cost_opt, base_dist, opt_dist, edge_meta, baseline_edge_meta = result_tuple
                 savings_std = cost_no - cost_wind
                 savings_opt = cost_wind - cost_opt
                 detour_pct = ((opt_dist - base_dist) / base_dist * 100) if base_dist > 0 else 0
@@ -277,6 +294,8 @@ def batch_stream(
                     "optimised_distance_nm": round(opt_dist, 1),
                     "detour_pct": round(detour_pct, 1),
                     "detour_hours": round(detour_hours, 1),
+                    "edge_meta": edge_meta,
+                    "baseline_edge_meta": baseline_edge_meta,
                 }
             except Exception as exc:
                 result = {"type": "error", "day": day_num + 1, "total": total_days, "date": date_str, "error": str(exc)}

@@ -214,8 +214,14 @@ def convert_to_parquet(nc_file, year, month):
     print(f"Latitude range: {df['latitude'].min()} to {df['latitude'].max()}")
     print(f"Longitude range: {df['longitude'].min()} to {df['longitude'].max()}")
     
+    # Close xarray dataset handle before unlinking temp file
+    ds.close()
+    
     # Clean up temporary file
-    nc_file.unlink()
+    try:
+        nc_file.unlink()
+    except Exception as cleanup_err:
+        print(f"Warning: could not remove temp file {nc_file}: {cleanup_err}")
     
     return output_file
 

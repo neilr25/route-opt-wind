@@ -54,9 +54,10 @@ def run_batch(
 
         t0 = time.time()
         try:
-            path, cost_std_no_wind, cost_std_wind, cost_opt = optimise(
+            result_tuple = optimise(
                 G, baseline, start_ll, end_ll, date_str, speed_kts
             )
+            path, cost_std_no_wind, cost_std_wind, cost_opt, baseline_dist_nm, opt_dist_nm, _ = result_tuple
             dur = time.time() - t0
             results.append({
                 "date": date_str,

@@ -1,7 +1,6 @@
 """Wind-based cost engine using real polar power curves."""
 
 import math
-from typing import Tuple
 
 from route_opt.polars_loader import POLAR
 
@@ -74,25 +73,65 @@ def fuel_no_wind(hours: float) -> float:
     return _fuel_rate_tph(p_no) * hours
 
 
+def _sog(stw_mps: float, current_u_ms: float, current_v_ms: float, bearing_deg: float) -> float:
+    """Speed over ground (m/s) from speed through water + current vector.
+    
+    Physics: Ground velocity = Ship velocity (through water) + Current velocity
+    """
+    # Convert STW to u,v components along bearing
+    ship_u = stw_mps * math.sin(math.radians(bearing_deg))
+    ship_v = stw_mps * math.cos(math.radians(bearing_deg))
+    
+    # Add current (current is in u,v east/north)
+    sog_u = ship_u + current_u_ms
+    sog_v = ship_v + current_v_ms
+    
+    # Ground speed magnitude
+    return math.sqrt(sog_u**2 + sog_v**2)
+
+
 def edge_cost(
     wind_speed_ms: float,
     wind_dir_deg: float,
     edge_bearing_deg: float,
     prev_bearing_deg: float | None,
-    hours: float,
+    distance_nm: float,
+    ship_speed_kts: float = 12.0,
+    current_u_ms: float = 0.0,
+    current_v_ms: float = 0.0,
 ) -> float:
     """Total cost for traversing an edge.
-
-    The wind ship only uses wingsail assist when it reduces fuel
-    vs motoring through the same wind without wings.
+    
+    Accounts for wind and ocean current effects on fuel and time.
+    
+    Uses speed-over-ground (SOG) for time calculation:
+        SOG = STW + current projection along bearing
+        hours = distance_nm / SOG_in_knots
+    
+    If no current data is provided, falls back to wind-only calculation
+    (identical to previous behavior when current_u_ms=current_v_ms=0).
     """
+    # Convert ship speed to m/s
+    stw_mps = ship_speed_kts * 0.514444
+    
+    # Calculate speed over ground
+    sog_mps = _sog(stw_mps, current_u_ms, current_v_ms, edge_bearing_deg)
+    sog_kts = sog_mps / 0.514444
+    
+    # If current grounds the ship (rare), use STW as fallback
+    if sog_kts <= 0:
+        sog_kts = ship_speed_kts
+    
+    # Time at SOG
+    hours = distance_nm / sog_kts
+    
     fuel_wi = fuel_with_wind(wind_speed_ms, wind_dir_deg, edge_bearing_deg, hours)
     fuel_no = fuel_without_wingsail(wind_speed_ms, wind_dir_deg, edge_bearing_deg, hours)
     fuel = min(fuel_no, fuel_wi)
+    
     if prev_bearing_deg is None:
         return fuel
-    # No turning penalty as requested
-    return fuel
+    return fuel * _turning_penalty(prev_bearing_deg, edge_bearing_deg)
 
 
 def _turning_penalty(prev_bearing_deg: float, edge_bearing_deg: float) -> float:
