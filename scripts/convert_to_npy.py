@@ -66,15 +66,24 @@ def convert_month(year: int, month: int):
     url_u = f"http://tds.hycom.org/thredds/dodsC/ESPC-D-V02/u3z/{year}"
     url_v = f"http://tds.hycom.org/thredds/dodsC/ESPC-D-V02/v3z/{year}"
 
-    ds_u = xr.open_dataset(url_u, decode_times=False)
-    ds_v = xr.open_dataset(url_v, decode_times=False)
-
     time_offset = (pd.Timestamp(year, month, 1) - pd.Timestamp(year, 1, 1)).days * 8
 
     for d in range(1, ndays + 1):
+        t_day = time.time()
+        print(f"  Day {d}/{ndays}...", end=" ", flush=True)
+        
+        ds_u = xr.open_dataset(url_u, decode_times=False, engine='netcdf4')
+        ds_v = xr.open_dataset(url_v, decode_times=False, engine='netcdf4')
         day_start = time_offset + (d - 1) * 8
+        
+        print(f"fetch u...", end=" ", flush=True)
         u_block = ds_u.isel(time=slice(day_start, day_start + 8), depth=0)['water_u'].compute().values
+        
+        print(f"v...", end=" ", flush=True)
         v_block = ds_v.isel(time=slice(day_start, day_start + 8), depth=0)['water_v'].compute().values
+        
+        ds_u.close()
+        ds_v.close()
 
         for t_idx in range(8):
             # HYCOM day runs 12:00 UTC to 09:00 UTC next day
@@ -86,12 +95,8 @@ def convert_month(year: int, month: int):
             cu[:, :, hour:hour+3] = u_block[t_idx][lat_map][:, lon_map][:, :, None]
             cv[:, :, hour:hour+3] = v_block[t_idx][lat_map][:, lon_map][:, :, None]
 
-        if d % 5 == 0:
-            print(f"  Day {d}/{ndays}")
-            gc.collect()
-
-    ds_u.close()
-    ds_v.close()
+        print(f"done ({time.time()-t_day:.0f}s)")
+        gc.collect()
 
     np.save(f"{base}_ws.npy", ws)
     np.save(f"{base}_wd.npy", wd)
