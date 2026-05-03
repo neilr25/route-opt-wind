@@ -60,8 +60,12 @@ input[type=date],input[type=number],input[type=text],select{box-sizing:border-bo
 <!-- Inputs -->
 <div class="panel">
 <div class="row">
-<div><label for="start">Start (port or lat,lon)</label><input id="start" value="COPENHAGEN" placeholder="COPENHAGEN"></div>
-<div><label for="end">End (port or lat,lon)</label><input id="end" value="LOOP TERMINAL" placeholder="LOOP TERMINAL"></div>
+<div><label for="start">Start (port or lat,lon)</label>
+  <select id="startPort" style="min-width:140px" onchange="$('start').value=this.value;this.value=''"><option value="">Select port…</option></select>
+  <input id="start" value="COPENHAGEN" placeholder="COPENHAGEN" style="margin-top:4px"></div>
+<div><label for="end">End (port or lat,lon)</label>
+  <select id="endPort" style="min-width:140px" onchange="$('end').value=this.value;this.value=''"><option value="">Select port…</option></select>
+  <input id="end" value="LOOP TERMINAL" placeholder="LOOP TERMINAL" style="margin-top:4px"></div>
 <div><label for="date">Date</label><input id="date" type="date" value="2025-06-01"><br><label for="voyageTime">Time (UTC)</label><select id="voyageTime" style="width:70px"><option value="00:00">00:00</option><option value="06:00">06:00</option><option value="12:00" selected>12:00</option><option value="18:00">18:00</option></select></div>
 <div><label for="speed">Speed (kts)</label><input id="speed" type="number" value="12" min="1" max="25" style="width:80px"></div>
 <div><label for="maxDetour">Max detour %</label><input id="maxDetour" type="number" value="" min="0" max="50" step="1" placeholder="None" style="width:80px"></div>
@@ -586,6 +590,17 @@ function reverseRoute() {
         startEl.value = endEl.value;
         endEl.value = tmp;
     }
+
+    const DEMO_PORTS = ['CHIBA','COPENHAGEN','LOOP TERMINAL','MELBOURNE','NOVOROSSIYSK','PORT RASHID'];
+    function populatePortDropdowns() {
+        const startSel = $('startPort');
+        const endSel   = $('endPort');
+        DEMO_PORTS.forEach(p => {
+            startSel.add(new Option(p, p));
+            endSel.add(new Option(p, p));
+        });
+    }
+    populatePortDropdowns();
 
     function clearWeatherCache() {
         if (!confirm('Clear all weather cache entries? This will reset the in-memory cache.')) return;
