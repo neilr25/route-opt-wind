@@ -14,8 +14,7 @@ import pandas as pd
 from route_opt.baseline import baseline_route as _baseline_route
 from route_opt.mesh import corridor_graph as _graph_for_route
 from route_opt.optimizer import optimise
-from route_opt.weather_client import preload_year
-from route_opt.hourly_weather import preload_year_hourly, wind_at_points_hourly
+from route_opt.corridor_weather import ensure_month_loaded
 from route_opt.visualizer import plot_routes
 from route_opt.api_helpers import _serialize_mesh, _parse_ll, _named_port
 from route_opt.weather_api import router as weather_router
@@ -42,14 +41,13 @@ def dashboard():
 
 @app.get("/optimize")
 def optimize(
-    start: str = Query(..., description="Start lat,lon or named port (e.g. '51.0,3.7' or 'ROTTERDAM')"),
+    start: str = Query(..., description="Start lat,lon or named port (e.g. '51.0,3.7' or 'COPENHAGEN'). Demo ports: CHIBA, COPENHAGEN, LOOP TERMINAL, MELBOURNE, NOVOROSSIYSK, PORT RASHID"),
     end: str = Query(..., description="End lat,lon or named port"),
     speed: float = Query(default=12.0, ge=1, le=25, description="Ship speed in knots"),
     voyage_date: str = Query(default="2025-06-01", pattern=r"^\d{4}-\d{2}-\d{2}$"),
     voyage_time: str = Query(default="12:00", pattern=r"^\d{2}:\d{2}$", description="UTC time (HH:MM) — defaults to 12:00 UTC (matches daily ERA5 snapshot)"),
     max_detour_pct: Optional[float] = Query(default=None, description="Max route detour as % of baseline distance (e.g. 10 for 10%)"),
     viz: bool = Query(default=False, description="Return Plotly HTML snippet?"),
-    use_hourly: bool = Query(default=True, description="Use hourly ERA5 weather (default true). Set false for daily snapshots only."),
     use_currents: bool = Query(default=True, description="Include ocean current effects on speed-over-ground (default true). Set false for wind-only routing."),
     corridor_width_nm: Optional[float] = Query(default=None, description="Corridor width in nm (default 200)"),
     lane_spacing_nm: Optional[float] = Query(default=None, description="Lane spacing in nm (default 25)"),
@@ -90,7 +88,6 @@ def optimize(
             G, baseline, start_ll, end_ll, voyage_date, speed,
             voyage_datetime=voyage_dt,
             max_detour_pct=max_detour_pct,
-            use_hourly=use_hourly,
             use_currents=use_currents,
         )
         path, cost_std_no_wind, cost_std_wind, cost_opt, baseline_dist_nm, opt_dist_nm, edge_meta, baseline_edge_meta = result_tuple
@@ -131,13 +128,12 @@ def optimize(
 
 @app.get("/batch")
 def batch_optimise(
-    start: str = Query(default="ROTTERDAM"),
-    end: str = Query(default="NEW YORK"),
+    start: str = Query(default="COPENHAGEN"),
+    end: str = Query(default="LOOP TERMINAL"),
     speed: float = Query(default=12.0, ge=1, le=25),
     start_date: str = Query(default="2025-01-01", pattern=r"^\d{4}-\d{2}-\d{2}$"),
     end_date: str = Query(default="2025-12-31", pattern=r"^\d{4}-\d{2}-\d{2}$"),
     max_detour_pct: Optional[float] = Query(default=None),
-    use_hourly: bool = Query(default=True, description="Use hourly ERA5 weather (default true)"),
 ):
     """Run batch optimisation for a date range. Returns JSON array of results."""
     try:
@@ -159,29 +155,26 @@ def batch_optimise(
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD")
 
-    year = d.year
-
-    # Pre-load weather (daily + hourly)
-    mesh_points = [(d["lat"], d["lon"]) for _, d in G.nodes(data=True)]
-    all_points = list(set(mesh_points + list(baseline)))
-    preload_year(year, sample_points=all_points)
-    try:
-        preload_year_hourly(year, all_points)
-    except FileNotFoundError:
-        pass
-
     total_days = (end_d - d).days + 1
     records = []
 
+    # Track which months we've loaded
+    _loaded_months = set()
+
     for day_num in range(total_days):
-        date_str = d.strftime("%Y-%m-%d")
-        voyage_dt = datetime(d.year, d.month, d.day, 12, 0)
+        current_date = d + timedelta(days=day_num) if day_num > 0 else d
+        date_str = current_date.strftime("%Y-%m-%d")
+        # Lazy-load corridor data on first encounter of each month
+        month_key = (current_date.year, current_date.month)
+        if month_key not in _loaded_months:
+            ensure_month_loaded(current_date.year, current_date.month)
+            _loaded_months.add(month_key)
+        voyage_dt = datetime(current_date.year, current_date.month, current_date.day, 12, 0)
         try:
             result_tuple = optimise(
                 G, baseline, start_ll, end_ll, date_str, speed,
                 voyage_datetime=voyage_dt,
                 max_detour_pct=max_detour_pct,
-                use_hourly=True,
             )
             path, cost_no, cost_wind, cost_opt, base_dist, opt_dist, _, _ = result_tuple
             savings_std = cost_no - cost_wind
@@ -217,13 +210,12 @@ def batch_optimise(
 
 @app.get("/batch_stream")
 def batch_stream(
-    start: str = Query(default="ROTTERDAM"),
-    end: str = Query(default="NEW YORK"),
+    start: str = Query(default="COPENHAGEN"),
+    end: str = Query(default="LOOP TERMINAL"),
     speed: float = Query(default=12.0, ge=1, le=25),
     start_date: str = Query(default="2025-01-01", pattern=r"^\d{4}-\d{2}-\d{2}$"),
     end_date: str = Query(default="2025-12-31", pattern=r"^\d{4}-\d{2}-\d{2}$"),
     max_detour_pct: Optional[float] = Query(default=None),
-    use_hourly: bool = Query(default=True, description="Use hourly ERA5 weather (default true)"),
 ):
     """Stream batch results via Server-Sent Events (SSE)."""
     try:
@@ -244,33 +236,27 @@ def batch_stream(
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD")
 
-    year = d.year
     total_days = (end_d - d).days + 1
 
-    mesh_points = [(nd["lat"], nd["lon"]) for _, nd in G.nodes(data=True)]
-    all_points = list(set(mesh_points + list(baseline)))
-
     def generate():
+        _loaded_months = set()
         yield f"data: {json.dumps({'type': 'preload', 'total': total_days, 'start': start_date, 'end': end_date})}\n\n"
-
-        preload_year(year, sample_points=all_points)
-        try:
-            preload_year_hourly(year, all_points)
-        except FileNotFoundError:
-            pass
-
         yield f"data: {json.dumps({'type': 'preload_done', 'total': total_days})}\n\n"
 
         for day_num in range(total_days):
             try:
                 current_date = d + timedelta(days=day_num)
                 date_str = current_date.strftime("%Y-%m-%d")
+                # Lazy-load corridor data on first encounter of each month
+                month_key = (current_date.year, current_date.month)
+                if month_key not in _loaded_months:
+                    ensure_month_loaded(current_date.year, current_date.month)
+                    _loaded_months.add(month_key)
                 voyage_dt = datetime(current_date.year, current_date.month, current_date.day, 12, 0)
                 result_tuple = optimise(
                     G, baseline, start_ll, end_ll, date_str, speed,
                     voyage_datetime=voyage_dt,
                     max_detour_pct=max_detour_pct,
-                    use_hourly=True,
                 )
                 path, cost_no, cost_wind, cost_opt, base_dist, opt_dist, edge_meta, baseline_edge_meta = result_tuple
                 savings_std = cost_no - cost_wind
@@ -333,30 +319,4 @@ def weather_hourly(
     }
 
 
-def _parse_ll(val: str) -> Tuple[float, float]:
-    try:
-        parts = val.strip().split(",")
-        return float(parts[0]), float(parts[1])
-    except Exception:
-        raise ValueError(f"Invalid lat,lon: {val}")
 
-
-_PORT_MAP = {
-    "ROTTERDAM": (51.9244, 4.4777),
-    "NEW YORK": (40.7128, -74.0060),
-    "SINGAPORE": (1.3521, 103.8198),
-    "SHANGHAI": (31.2304, 121.4737),
-    "LOS ANGELES": (33.7362, -118.2922),
-    "HAMBURG": (53.5488, 9.9872),
-    "VALENCIA": (39.4699, -0.3763),
-    "TOKYO": (35.6762, 139.6503),
-    "BUSAN": (35.1145, 129.0403),
-    "ALGECIRAS": (36.1333, -5.4500),
-}
-
-
-def _named_port(name: str) -> Tuple[float, float]:
-    key = name.strip().upper()
-    if key not in _PORT_MAP:
-        raise HTTPException(status_code=400, detail=f"Unknown port: {name}. Known: {list(_PORT_MAP.keys())}")
-    return _PORT_MAP[key]

@@ -14,18 +14,18 @@ Given two ports, a voyage date, and ship speed, the engine calculates **three fu
 
 The difference between line 2 and 3 is the **extra fuel saved by deviating from the standard lane** to exploit favourable winds.
 
-## 2025 Annual Results (Rotterdam → New York, 12 kts)
+## 2025 Annual Results (Copenhagen → LOOP Terminal, 12 kts)
 
 | Metric | Mean | Best Day |
 |--------|------|----------|
-| Standard fuel (no wind) | 206.6 t | 159.9 t |
-| Standard fuel (with wind) | 187.8 t | 95.0 t |
-| **Optimised fuel (with wind)** | **169.3 t** | **80.0 t** |
-| Wind savings alone | 18.9 t | 70.9 t |
-| **Optimisation extra savings** | **18.5 t** | **61.2 t** |
-| Total savings | 37.3 t | 86.6 t |
+| Standard fuel (no wind) | 196.4 t | 177.8 t |
+| Standard fuel (with wind) | 180.8 t | 169.8 t |
+| **Optimised fuel (with wind)** | **158.1 t** | **150.3 t** |
+| Wind savings alone | 15.6 t | 18.5 t |
+| **Optimisation extra savings** | **22.7 t** | **27.5 t** |
+| Total savings | 38.3 t | 46.0 t |
 
-Best optimisation day: **2025-10-03** saved **61.2 t (27.8%)**.
+Best optimisation day: **2025-01-07** saved **27.2% total** (wind 10.4% + opt 20.9%).
 
 ## Quick Start
 
@@ -37,19 +37,20 @@ python -m venv .venv
 .venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 
-# 2. Place weather Parquet files in C:\app\data\ (weather_2025-01.parquet … weather_2025-12.parquet)
+# 2. Place ERA5 hourly Parquet files in C:\app\data\ (weather_2025-01_hourly.parquet …)
+#    + unified current files (unified_*.parquet) for ocean current data.
 #    See weather-proxy-api repo for how these are generated from ERA5.
 
-# 3. Single day CLI
-python -m route_opt.main --start "ROTTERDAM" --end "NEW YORK" --speed 12 --date 2025-06-01
+# 3. Single day CLI (demo ports only: CHIBA, COPENHAGEN, LOOP TERMINAL, MELBOURNE, NOVOROSSIYSK, PORT RASHID)
+python -m route_opt.main --start "COPENHAGEN" --end "LOOP TERMINAL" --speed 12 --date 2025-01-15
 
 # 4. Start dashboard server
 python -m route_opt.main --serve
 # Open http://localhost:8002/ in browser
 
-# 5. Batch run (365 days)
-python batch_run_2025.py
-# Output: results_2025_rotterdam_newyork.parquet
+# 5. Batch run (30 days, demo routes)
+python batch_demo_fast.py
+# Output: results_demo_fast.parquet
 ```
 
 ## Dashboard
@@ -71,7 +72,8 @@ main.py
   ├── mesh.py             # VOIDS-style corridor grid
   ├── cost_engine.py      # Wind → TWA → Polar → Fuel
   ├── optimizer.py        # A* search through graph
-  ├── weather_client.py   # DuckDB Parquet lookup (cached)
+  ├── hourly_weather.py   # ERA5 hourly Parquet lookup (cached + disk cache)
+  ├── unified_weather.py  # Wind + current unified lookup (compact numpy cache)
   ├── polars_loader.py    # Hadnymax-2FR35 bilinear lookup
   ├── atobviac_loader.py  # Baseline route JSON loader
   ├── config.py           # Corridor resolution knobs
@@ -99,10 +101,10 @@ main.py
 
 | File | Purpose |
 |------|---------|
-| `batch_run_2025.py` | 365-day batch, saves `results_2025_rotterdam_newyork.parquet` |
+| `batch_demo_fast.py` | 30-day batch, saves `results_demo_fast.parquet` |
 | `data/Hadnymax-2FR35-polars.csv` | Ship performance polars |
-| `data/atobviac_rotterdam_newyork.json` | ATOBVIAC TSS baseline route (108 waypoints) |
-| `results_2025_rotterdam_newyork.parquet` | Annual batch results (365 rows) |
+| `data/atobviac_copenhagen_loopterminal.json` | ATOBVIAC TSS baseline route (25 waypoints) |
+| `results_demo_fast.parquet` | Monthly batch results (~150 rows) |
 
 ## Assumptions
 

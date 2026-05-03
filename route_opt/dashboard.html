@@ -60,18 +60,11 @@ input[type=date],input[type=number],input[type=text],select{box-sizing:border-bo
 <!-- Inputs -->
 <div class="panel">
 <div class="row">
-<div><label for="start">Start (port or lat,lon)</label><input id="start" value="ROTTERDAM" placeholder="ROTTERDAM"></div>
-<div><label for="end">End (port or lat,lon)</label><input id="end" value="NEW YORK" placeholder="NEW YORK"></div>
+<div><label for="start">Start (port or lat,lon)</label><input id="start" value="COPENHAGEN" placeholder="COPENHAGEN"></div>
+<div><label for="end">End (port or lat,lon)</label><input id="end" value="LOOP TERMINAL" placeholder="LOOP TERMINAL"></div>
 <div><label for="date">Date</label><input id="date" type="date" value="2025-06-01"><br><label for="voyageTime">Time (UTC)</label><select id="voyageTime" style="width:70px"><option value="00:00">00:00</option><option value="06:00">06:00</option><option value="12:00" selected>12:00</option><option value="18:00">18:00</option></select></div>
 <div><label for="speed">Speed (kts)</label><input id="speed" type="number" value="12" min="1" max="25" style="width:80px"></div>
 <div><label for="maxDetour">Max detour %</label><input id="maxDetour" type="number" value="" min="0" max="50" step="1" placeholder="None" style="width:80px"></div>
-<div>
-  <label for="weatherMode">Weather</label>
-  <select id="weatherMode" style="width:110px">
-    <option value="hourly" selected>Hourly</option>
-    <option value="daily">Daily</option>
-  </select>
-</div>
 <div style="display:flex;align-items:center;gap:5px;padding-top:18px">
   <input type="checkbox" id="useCurrents" checked>
   <label for="useCurrents" style="font-size:13px;cursor:pointer">Ocean currents</label>
@@ -153,7 +146,6 @@ input[type=date],input[type=number],input[type=text],select{box-sizing:border-bo
         const date = $('date').value;
         const speed = $('speed').value;
         const maxDetour = $('maxDetour').value;
-        const weatherMode = $('weatherMode').value; // hourly | daily
         _lastStart = start;
         _lastEnd = end;
         _lastSpeed = speed;
@@ -161,7 +153,7 @@ input[type=date],input[type=number],input[type=text],select{box-sizing:border-bo
         try {
             const controller = new AbortController();
             const timeoutId = setTimeout(() => controller.abort(), 120000);
-            let url = `/optimize?start=${encodeURIComponent(start)}&end=${encodeURIComponent(end)}&voyage_date=${date}&voyage_time=${$('voyageTime').value}&speed=${speed}&use_hourly=${weatherMode === 'hourly'}&use_currents=${$('useCurrents').checked}`;
+            let url = `/optimize?start=${encodeURIComponent(start)}&end=${encodeURIComponent(end)}&voyage_date=${date}&voyage_time=${$('voyageTime').value}&speed=${speed}&use_currents=${$('useCurrents').checked}`;
             if (maxDetour) url += `&max_detour_pct=${encodeURIComponent(maxDetour)}`;
             const cw = $('corridorWidth').value;
             const ls = $('laneSpacing').value;
@@ -457,7 +449,7 @@ input[type=date],input[type=number],input[type=text],select{box-sizing:border-bo
         const originalText = link.textContent;
         link.textContent = 'Loading route…';
 
-        let url = `/optimize?start=${encodeURIComponent(_lastStart)}&end=${encodeURIComponent(_lastEnd)}&voyage_date=${date}&voyage_time=${$('voyageTime').value}&speed=${_lastSpeed}&use_hourly=${$('weatherMode').value === 'hourly'}&use_currents=${$('useCurrents').checked}`;
+        let url = `/optimize?start=${encodeURIComponent(_lastStart)}&end=${encodeURIComponent(_lastEnd)}&voyage_date=${date}&voyage_time=${$('voyageTime').value}&speed=${_lastSpeed}&use_currents=${$('useCurrents').checked}`;
         const cw = $('corridorWidth').value;
         const ls = $('laneSpacing').value;
         const ss = $('stageSkip').value;
@@ -494,7 +486,6 @@ input[type=date],input[type=number],input[type=text],select{box-sizing:border-bo
         const speed = $('speed').value;
         const batchStart = $('batchStart').value;
         const batchEnd = $('batchEnd').value;
-        const weatherMode = $('weatherMode').value;
         _lastStart = start;
         _lastEnd = end;
         _lastSpeed = speed;
@@ -508,7 +499,7 @@ input[type=date],input[type=number],input[type=text],select{box-sizing:border-bo
         try {
             const controller = new AbortController();
             const year = batchStart.substring(0, 4);
-            const r = await fetch(`/batch_stream?start=${encodeURIComponent(start)}&end=${encodeURIComponent(end)}&speed=${speed}&start_date=${batchStart}&end_date=${batchEnd}&use_hourly=${weatherMode === 'hourly'}`, {
+            const r = await fetch(`/batch_stream?start=${encodeURIComponent(start)}&end=${encodeURIComponent(end)}&speed=${speed}&start_date=${batchStart}&end_date=${batchEnd}`, {
                 signal: controller.signal
             });
             const reader = r.body.getReader();

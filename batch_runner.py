@@ -1,7 +1,7 @@
 """Batch route optimisation for an entire year (or any date range).
 
-Example:
-    python batch_runner.py --start ROTTERDAM --end NEW YORK \
+Example (demo ports only: CHIBA, COPENHAGEN, LOOP TERMINAL, MELBOURNE, NOVOROSSIYSK, PORT RASHID):
+    python batch_runner.py --start COPENHAGEN --end "LOOP TERMINAL" \
         --from-date 2025-01-01 --to-date 2025-01-31 \
         --speed 12 --out results.parquet
 """
@@ -17,13 +17,28 @@ import pandas as pd
 from route_opt.baseline import baseline_route
 from route_opt.mesh import corridor_graph
 from route_opt.optimizer import optimise
-from route_opt.weather_client import _weather_cache
+from route_opt.unified_weather import _get_cache as _get_unified_cache
+from route_opt.hourly_weather import _get_monthly_cache
 
 
 def daterange(start: date, end: date):
     """Yield dates from start to end inclusive."""
     for n in range(int((end - start).days) + 1):
         yield start + timedelta(days=n)
+
+
+def _months_in_range(from_date: date, to_date: date) -> List[Tuple[int, int]]:
+    """Return list of (year, month) tuples spanning the date range."""
+    months = []
+    y, m = from_date.year, from_date.month
+    ey, em = to_date.year, to_date.month
+    while (y, m) <= (ey, em):
+        months.append((y, m))
+        m += 1
+        if m > 12:
+            m = 1
+            y += 1
+    return months
 
 
 def run_batch(
@@ -37,15 +52,34 @@ def run_batch(
     """
     Run optimisation for every day in range.
     Baseline route and corridor graph are built once then cached.
-    Weather cache is cleared between months to keep memory bounded.
+    All month caches are pre-warmed before the daily loop starts.
     """
     # Build once
     baseline = baseline_route(start_ll, end_ll)
     G = corridor_graph(baseline)
     graph_nodes = list(G.nodes(data=True))
 
+    # Collect all unique points that the optimizer will need
+    mesh_pts = [(d["lat"], d["lon"]) for _, d in graph_nodes]
+    all_pts = list(set(mesh_pts + list(baseline)))
+
+    # Pre-warm all month caches up-front (disk cache makes this ~0.05s per month)
+    months = _months_in_range(from_date, to_date)
+    if months:
+        print(f"Pre-warming {len(months)} month cache(s) ...", end=" ", flush=True)
+        t_warm = time.time()
+        for y, m in months:
+            try:
+                _get_unified_cache(y, m, all_pts)
+            except Exception:
+                pass
+            try:
+                _get_monthly_cache(y, m, all_pts)
+            except Exception:
+                pass
+        print(f"{time.time() - t_warm:.1f}s")
+
     results: List[dict] = []
-    prev_month = None
 
     total_start = time.time()
     for i, voyage_date in enumerate(daterange(from_date, to_date), 1):
@@ -57,7 +91,7 @@ def run_batch(
             result_tuple = optimise(
                 G, baseline, start_ll, end_ll, date_str, speed_kts
             )
-            path, cost_std_no_wind, cost_std_wind, cost_opt, baseline_dist_nm, opt_dist_nm, _ = result_tuple
+            path, cost_std_no_wind, cost_std_wind, cost_opt, baseline_dist_nm, opt_dist_nm, _, _ = result_tuple
             dur = time.time() - t0
             results.append({
                 "date": date_str,
@@ -86,12 +120,6 @@ def run_batch(
                 "elapsed_s": round(dur, 2),
                 "error": str(exc),
             })
-
-        # Flush weather cache on month boundary to keep memory bounded
-        current_month = date_str[:7]
-        if prev_month and current_month != prev_month:
-            _weather_cache.clear()
-        prev_month = current_month
 
     total_dur = time.time() - total_start
     print(f"\nDone. {len(results)} days in {total_dur:.1f}s ({total_dur/len(results):.1f}s/day)")

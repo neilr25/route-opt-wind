@@ -24,16 +24,13 @@ def parse_location(loc_str):
         ValueError: If location format is invalid or port name not found.
     """
     port_names = {
-        "ROTTERDAM": (51.9224, 4.4792),
-        "NEW YORK": (40.6413, -74.0649),
-        "SINGAPORE": (1.3644, 103.9915),
-        "SHANGHAI": (31.2304, 121.4737),
-        "LOS_ANGELES": (33.7175, -118.2529),
-        "HAMBURG": (53.5511, 9.9937),
-        "VALENCIA": (39.4699, -0.3763),
-        "TOKYO": (35.6762, 139.6503),
-        "BUSAN": (35.1796, 129.0756),
-        "ALGECIRAS": (36.1432, -5.4517),
+        # Demo ports (AtoBviaC demo key supports these 6 only)
+        "CHIBA": (35.6074, 140.1065),
+        "COPENHAGEN": (55.6761, 12.5683),
+        "LOOP TERMINAL": (29.6167, -89.9167),
+        "MELBOURNE": (-37.8136, 144.9631),
+        "NOVOROSSIYSK": (44.7239, 37.7689),
+        "PORT RASHID": (25.2675, 55.2775),
     }
 
     loc_upper = loc_str.upper().strip().replace("_", " ")

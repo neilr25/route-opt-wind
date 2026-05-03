@@ -1,7 +1,7 @@
-"""Batch run Rotterdam to New York for all of 2025, save to Parquet.
+"""Batch run Copenhagen to LOOP Terminal for all of 2025, save to Parquet.
 
-Uses weather pre-loading for ~13s startup then ~0.02s per day.
-Total: ~20s for 365 days (vs 27 min previously).
+Uses hourly weather pre-loading for fast startup.
+Demo ports only: CHIBA, COPENHAGEN, LOOP TERMINAL, MELBOURNE, NOVOROSSIYSK, PORT RASHID
 """
 import time
 from datetime import date, timedelta
@@ -12,13 +12,13 @@ import pandas as pd
 from route_opt.baseline import baseline_route
 from route_opt.mesh import corridor_graph
 from route_opt.optimizer import optimise
-from route_opt.weather_client import preload_year
+from route_opt.hourly_weather import preload_year_hourly
 
-START = (51.9244, 4.4777)
-END = (40.7128, -74.0060)
+START = (55.6761, 12.5683)
+END = (29.6167, -89.9167)
 SPEED = 12.0
 YEAR = 2025
-OUTPUT = Path("results_2025_rotterdam_newyork.parquet")
+OUTPUT = Path("results_2025_copenhagen_loopterminal.parquet")
 
 
 def main():
@@ -31,12 +31,12 @@ def main():
     G = corridor_graph(base)
     print(f"Mesh: {len(G.nodes)} nodes, {len(G.edges)} edges")
 
-    # Pre-load weather for the entire year
+    # Pre-load hourly weather for the entire year
     mesh_points = [(d["lat"], d["lon"]) for _, d in G.nodes(data=True)]
     all_points = list(set(mesh_points + list(base)))
-    print(f"Pre-loading {YEAR} weather for {len(all_points)} unique points...")
+    print(f"Pre-loading {YEAR} hourly weather for {len(all_points)} unique points...")
     t_preload = time.time()
-    preload_year(YEAR, sample_points=all_points)
+    preload_year_hourly(YEAR, all_points)
     print(f"Weather pre-load: {time.time() - t_preload:.1f}s")
 
     # Run optimisation for each day
@@ -48,7 +48,7 @@ def main():
         date_str = d.strftime("%Y-%m-%d")
         t0 = time.time()
         try:
-            path, cost_no_wind, cost_std_wind, cost_opt, baseline_dist_nm, opt_dist_nm = optimise(
+            path, cost_no_wind, cost_std_wind, cost_opt, baseline_dist_nm, opt_dist_nm, _, _ = optimise(
                 G, base, START, END, date_str, SPEED
             )
             elapsed = time.time() - t0

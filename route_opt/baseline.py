@@ -1,9 +1,8 @@
-"""Generate baseline route via searoute standard lanes."""
+"""Generate baseline route via ATOBVIAC precomputed JSON routes."""
 
 import math
 from typing import List, Tuple
 
-import searoute as sr
 from global_land_mask import globe
 
 

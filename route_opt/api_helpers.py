@@ -42,16 +42,13 @@ def _parse_ll(val: str) -> Tuple[float, float]:
 
 
 _PORT_MAP = {
-    "ROTTERDAM": (51.9244, 4.4777),
-    "NEW YORK": (40.7128, -74.0060),
-    "SINGAPORE": (1.3521, 103.8198),
-    "SHANGHAI": (31.2304, 121.4737),
-    "LOS ANGELES": (33.7362, -118.2922),
-    "HAMBURG": (53.5488, 9.9872),
-    "VALENCIA": (39.4699, -0.3763),
-    "TOKYO": (35.6762, 139.6503),
-    "BUSAN": (35.1145, 129.0403),
-    "ALGECIRAS": (36.1333, -5.4500),
+    # Frontend dropdown demo ports (AtoBviaC demo key supports these 6 only)
+    "CHIBA": (35.6074, 140.1065),
+    "COPENHAGEN": (55.6761, 12.5683),
+    "LOOP TERMINAL": (29.6167, -89.9167),
+    "MELBOURNE": (-37.8136, 144.9631),
+    "NOVOROSSIYSK": (44.7239, 37.7689),
+    "PORT RASHID": (25.2675, 55.2775),
 }
 
 
