@@ -15,7 +15,7 @@ def parse_location(loc_str):
     """Parse location string: either port name or lat,lon coordinates.
 
     Args:
-        loc_str: Port name (e.g., 'ROTTERDAM') or 'lat,lon' string.
+        loc_str: Port name (e.g., 'COPENHAGEN') or 'lat,lon' string.
 
     Returns:
         Tuple (lat, lon) as floats.

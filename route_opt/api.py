@@ -14,7 +14,7 @@ import pandas as pd
 from route_opt.baseline import baseline_route as _baseline_route
 from route_opt.mesh import corridor_graph as _graph_for_route
 from route_opt.optimizer import optimise
-from route_opt.corridor_weather import ensure_month_loaded
+from route_opt.corridor_weather import ensure_month_loaded, clear_cache, get_cache_status
 from route_opt.visualizer import plot_routes
 from route_opt.api_helpers import _serialize_mesh, _parse_ll, _named_port
 from route_opt.weather_api import router as weather_router
@@ -29,6 +29,19 @@ _DASHBOARD_PATH = Path(__file__).resolve().parent / "dashboard.html"
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+
+@app.get("/cache/clear")
+def clear_cache_endpoint():
+    """Wipe all in-memory bbox and DataFrame caches. Safe to call anytime."""
+    clear_cache()
+    return {"cleared": True}
+
+
+@app.get("/cache/status")
+def cache_status_endpoint():
+    """Return bbox cache stats for dashboard display."""
+    return get_cache_status()
 
 
 @app.get("/", response_class=HTMLResponse)

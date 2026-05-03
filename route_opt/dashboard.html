@@ -72,6 +72,10 @@ input[type=date],input[type=number],input[type=text],select{box-sizing:border-bo
 <div><br><button id="go" onclick="run()">Analyse</button> <button class="secondary" onclick="reverseRoute()" title="Swap start and end ports">⇄ Reverse</button></div>
 </div>
 <span class="adv-toggle" onclick="toggleAdvanced()">▼ Advanced corridor settings</span>
+<div class="row" style="margin-top:8px;align-items:center">
+  <button class="secondary" onclick="clearWeatherCache()" title="Free memory">🗑 Clear Weather Cache</button>
+  <span id="cacheStatus" style="font-size:12px;color:#666;margin-left:8px">Cache: 0 MB / 2 GB</span>
+</div>
 <div id="advSection" class="adv-section row">
   <div><label for="corridorWidth">Corridor width (nm)</label><input id="corridorWidth" type="number" value="200" min="50" max="500" step="10" style="width:90px"></div>
   <div><label for="laneSpacing">Lane spacing (nm)</label><input id="laneSpacing" type="number" value="25" min="10" max="100" step="5" style="width:90px"></div>
@@ -582,6 +586,31 @@ function reverseRoute() {
         startEl.value = endEl.value;
         endEl.value = tmp;
     }
+
+    function clearWeatherCache() {
+        if (!confirm('Clear all weather cache entries? This will reset the in-memory cache.')) return;
+        fetch('/cache/clear')
+            .then(r => r.json())
+            .then(data => {
+                if (data.cleared) {
+                    $('cacheStatus').textContent = 'Cache cleared ✓';
+                    setTimeout(updateCacheStatus, 500);
+                }
+            })
+            .catch(e => { $('cacheStatus').textContent = 'Clear failed: ' + e.message; });
+    }
+
+    async function updateCacheStatus() {
+        try {
+            const r = await fetch('/cache/status');
+            const data = await r.json();
+            $('cacheStatus').textContent = `Cache: ${data.total_mb} MB / ${data.max_mb} MB  ·  ${data.entry_count} month(s)`;
+        } catch (e) {
+            $('cacheStatus').textContent = 'Cache: unavailable';
+        }
+    }
+    setInterval(updateCacheStatus, 30000);
+    updateCacheStatus();
 
     function toggleAdvanced() {
         const section = $('advSection');

@@ -42,3 +42,9 @@ report.py
 
 # Config with secrets
 .env
+
+*.bak
+tmp_*.py
+logs/
+bench_result.txt
+benchmark_results.csv
