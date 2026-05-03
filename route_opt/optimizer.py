@@ -2,17 +2,15 @@
 
 import heapq
 import math
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
 
 import networkx as nx
 
 from route_opt.cost_engine import edge_cost, fuel_no_wind, fuel_without_wingsail, fuel_with_wind, _twa, _sog
-from route_opt.weather_client import wind_at_points
-from route_opt.hourly_weather import wind_at_points_hourly
+from route_opt.corridor_weather import weather_and_current_at_points as _weather_and_current, wind_at_points_hourly, preload_bounding_box, _weather_and_current_bbox
+
 from route_opt.time_engine import baseline_etas, node_etas
-from route_opt.current_client import current_at_points as _current_at_points
-from route_opt.unified_weather import weather_and_current_at_points as _weather_and_current
 
 
 def _haversine_nm(a: Tuple[float, float], b: Tuple[float, float]) -> float:
@@ -68,7 +66,7 @@ def _densify_route(route, max_gap_nm=22.0):
     return out
 
 
-def _baseline_costs(baseline, etas, speed_kts, date_str, use_hourly, baseline_currents=None):
+def _baseline_costs(baseline, etas, speed_kts, baseline_currents=None):
     """Return baseline costs using hourly weather and optional currents.
     
     Densifies baseline to ~22nm segments so each sub-segment samples
@@ -88,14 +86,10 @@ def _baseline_costs(baseline, etas, speed_kts, date_str, use_hourly, baseline_cu
     else:
         densified_currents = None
     
-    # Fetch wind for densified points (for accurate cost)
-    if use_hourly:
-        densified_winds = wind_at_points_hourly(densified, densified_etas)
-        # Also fetch wind at original baseline points (for edge_meta display)
-        baseline_winds = wind_at_points_hourly(baseline, etas)
-    else:
-        densified_winds = wind_at_points(densified, date_str)
-        baseline_winds = wind_at_points(baseline, date_str)
+    # Fetch wind for densified points (always hourly)
+    densified_winds = wind_at_points_hourly(densified, densified_etas)
+    # Also fetch wind at original baseline points (for edge_meta display)
+    baseline_winds = wind_at_points_hourly(baseline, etas)
     
     cost_std_no_wind = 0.0
     cost_std_with_wind = 0.0
@@ -162,19 +156,81 @@ def _interpolate_currents(original_route, original_currents, densified_route):
     return densified_currents
 
 
-def _fetch_hourly_winds(G, nodes, node_etas_map, date_str, use_hourly):
-    """Fetch hourly wind for all nodes, falling back to daily if hourly unavailable."""
+def _baseline_etas_sog(baseline, currents_list, start_dt, speed_kts):
+    """Compute baseline ETAs using SOG (speed over ground) instead of STW.
+
+    For each segment, computes SOG from STW + current projection along bearing,
+    then accumulates ETAs iteratively. Falls back to STW when no current data
+    is available or if SOG is near zero (current opposing ship grounds it).
+
+    Args:
+        baseline: List of (lat, lon) waypoints.
+        currents_list: List of (cu, cv) current tuples, one per waypoint.
+                       If None or empty, falls back to STW.
+        start_dt: Voyage start datetime.
+        speed_kts: Ship speed through water in knots.
+
+    Returns:
+        List of datetime ETAs for each baseline waypoint.
+    """
+    if not currents_list:
+        return baseline_etas(baseline, start_dt, speed_kts)
+
+    etas = [start_dt]
+    stw_mps = speed_kts * 0.514444
+    for i in range(1, len(baseline)):
+        dist = _haversine_nm(baseline[i - 1], baseline[i])
+        bearing = _bearing_seg(baseline[i - 1], baseline[i])
+        cu, cv = currents_list[i - 1] if i - 1 < len(currents_list) else (0.0, 0.0)
+        sog_mps = _sog(stw_mps, cu, cv, bearing)
+        sog_kts = sog_mps / 0.514444
+        if sog_kts <= 0:
+            sog_kts = speed_kts  # fallback to STW if current grounds the ship
+        hours = dist / sog_kts
+        etas.append(etas[-1] + timedelta(hours=hours))
+    return etas
+
+
+def _node_etas_sog(G, baseline_etas_sog_list, stage_indices):
+    """Compute node ETAs using SOG-corrected baseline ETAs.
+
+    Each mesh node maps to an "equivalent base node" — the baseline waypoint
+    at the same stage. The node's ETA is the SOG-corrected ETA for that
+    baseline waypoint.
+
+    Args:
+        G: NetworkX graph with stage_idx on nodes.
+        baseline_etas_sog_list: SOG-corrected ETAs for baseline waypoints.
+        stage_indices: List mapping stage index to baseline waypoint index.
+
+    Returns:
+        Dict mapping node -> SOG-corrected ETA datetime.
+    """
+    max_stage = len(stage_indices) - 1
+    result = {}
+    for n, d in G.nodes(data=True):
+        if "stage_idx" not in d:
+            continue
+        idx = min(d["stage_idx"], max_stage)
+        base_idx = stage_indices[idx]
+        base_idx = min(base_idx, len(baseline_etas_sog_list) - 1)
+        result[n] = baseline_etas_sog_list[base_idx]
+    return result
+
+
+def _fetch_hourly_winds(G, nodes, node_etas_map, date_str):
+    """Fetch hourly wind for all nodes."""
     points = [(d["lat"], d["lon"]) for _, d in nodes]
-    if not use_hourly:
-        return wind_at_points(points, date_str)
     etas = [node_etas_map.get(n[0], datetime.min) for n in nodes]
     if datetime.min in etas:
-        return wind_at_points(points, date_str)
+        # Fallback: return zeros if ETAs not available
+        return [(0.0, 0.0)] * len(points)
     return wind_at_points_hourly(points, etas)
 
 
 def _compute_edge_meta_for_graph(G, path_nodes, wind_map, current_map, node_etas_map, voyage_dt, speed_kts):
     meta = []
+    stw_mps = speed_kts * 0.514444
     for i in range(len(path_nodes) - 1):
         n_u = path_nodes[i]
         n_v = path_nodes[i + 1]
@@ -183,10 +239,12 @@ def _compute_edge_meta_for_graph(G, path_nodes, wind_map, current_map, node_etas
         e_data = G.edges[n_u, n_v]
         dist = e_data["distance_nm"]
         bearing = e_data["bearing"]
-        hours = dist / speed_kts
+        current_u, current_v = current_map.get(n_v, (0.0, 0.0))
+        sog_mps = _sog(stw_mps, current_u, current_v, bearing)
+        sog_kts = sog_mps / 0.514444 if sog_mps > 0 else speed_kts
+        hours = dist / sog_kts
         eta = node_etas_map.get(n_u, voyage_dt).isoformat()
         ws, wd = wind_map.get(n_v, (0.0, 0.0))
-        current_u, current_v = current_map.get(n_v, (0.0, 0.0))
         current_speed = math.sqrt(current_u ** 2 + current_v ** 2)
         prev_b = G.edges[path_nodes[i - 1], n_u]["bearing"] if i > 0 else None
         fuel_t = edge_cost(ws, wd, bearing, prev_b, dist, speed_kts, current_u, current_v)
@@ -212,15 +270,18 @@ def _compute_edge_meta_for_graph(G, path_nodes, wind_map, current_map, node_etas
 
 def _compute_edge_meta_for_waypoints(waypoints, winds, currents, etas, speed_kts):
     meta = []
+    stw_mps = speed_kts * 0.514444
     for i in range(len(waypoints) - 1):
         a = waypoints[i]
         b = waypoints[i + 1]
         dist = _haversine_nm(a, b)
         bearing = _bearing_seg(a, b)
-        hours = dist / speed_kts
+        cu, cv = currents[i] if i < len(currents) else (0.0, 0.0)
+        sog_mps = _sog(stw_mps, cu, cv, bearing)
+        sog_kts = sog_mps / 0.514444 if sog_mps > 0 else speed_kts
+        hours = dist / sog_kts
         eta = etas[i].isoformat()
         ws, wd = winds[i]
-        cu, cv = currents[i] if i < len(currents) else (0.0, 0.0)
         current_speed = math.sqrt(cu ** 2 + cv ** 2)
         fuel_t = edge_cost(ws, wd, bearing, None, dist, speed_kts, cu, cv)
         twa = _twa(wd, bearing)
@@ -252,7 +313,6 @@ def optimise(
     ship_speed_kts: float,
     voyage_datetime: Optional[datetime] = None,
     max_detour_pct: Optional[float] = None,
-    use_hourly: bool = True,
     use_currents: bool = True,
 ) -> Tuple[List[Tuple[float, float]], float, float, float, float, float, List[Dict], List[Dict]]:
     """
@@ -285,23 +345,49 @@ def optimise(
     # ---- Compute baseline ETAs and costs ----
     baseline_etas_list = baseline_etas(baseline, voyage_datetime, ship_speed_kts)
 
-    # ---- Pre-fetch ocean currents (prefer unified weather for speed) ----
+    # ---- Pre-load bounding box weather cache (eliminates per-point DuckDB overhead) ----
+    # Collect ALL points that will be queried + ALL datetimes for hour-range estimation
+    all_points = set()
+    all_hours = []
+    for _, d in nodes:
+        all_points.add((d["lat"], d["lon"]))
+    for lat, lon in baseline:
+        all_points.add((lat, lon))
+    for dt in baseline_etas_list:
+        all_hours.append(int((dt.timestamp() - 1735689600) / 3600))
+    for n in nodes:
+        dt = node_etas_map.get(n[0], voyage_datetime)
+        all_hours.append(int((dt.timestamp() - 1735689600) / 3600))
+
+    # Pre-load for the voyage month
+    from route_opt.corridor_weather import preload_bounding_box
+    y = voyage_datetime.year
+    m = voyage_datetime.month
+    hr_min = max(0, min(all_hours) - 1)
+    hr_max = max(all_hours) + 1
+    preload_ok = preload_bounding_box(
+        y, m, list(all_points), hr_min=hr_min, hr_max=hr_max
+    )
+
+    # ---- Pre-fetch ocean currents (use cached bbox if available) ----
     if use_currents:
-        # Use unified weather (compact numpy cache, O(1) lookup, handles wind+current together)
         baseline_pts = list(baseline)
         baseline_etas_uniform = list(baseline_etas_list)
         node_pts = [(d["lat"], d["lon"]) for _, d in nodes]
         node_etas_list = [node_etas_map.get(n[0], voyage_datetime) for n in nodes]
         
-        # Fetch baseline wind+current via unified
-        baseline_unified = _weather_and_current(baseline_pts, baseline_etas_uniform)
+        if preload_ok:
+            baseline_unified = _weather_and_current_bbox(y, m, baseline_pts, baseline_etas_uniform)
+            node_unified = _weather_and_current_bbox(y, m, node_pts, node_etas_list)
+        else:
+            baseline_unified = _weather_and_current(baseline_pts, baseline_etas_uniform)
+            node_unified = _weather_and_current(node_pts, node_etas_list)
+        
         baseline_currents = [
             (r[2], r[3]) if r is not None else (0.0, 0.0)
             for r in baseline_unified
         ]
         
-        # Fetch node wind+current via unified
-        node_unified = _weather_and_current(node_pts, node_etas_list)
         wind_map: Dict[Tuple[int, int], Tuple[float, float]] = {}
         current_map: Dict[Tuple[int, int], Tuple[float, float]] = {}
         for n, r in zip(nodes, node_unified):
@@ -312,7 +398,6 @@ def optimise(
                 wind_map[n[0]] = (0.0, 0.0)
                 current_map[n[0]] = (0.0, 0.0)
         
-        # Wind already fetched from unified — skip separate wind fetch
         _wind_already_fetched = True
     else:
         baseline_currents = None
@@ -320,13 +405,20 @@ def optimise(
         _wind_already_fetched = False
 
     cost_std_no_wind, cost_std_with_wind, baseline_winds = _baseline_costs(
-        baseline, baseline_etas_list, ship_speed_kts, date_str, use_hourly, baseline_currents
+        baseline, baseline_etas_list, ship_speed_kts, baseline_currents
     )
 
-    # ---- Pre-fetch weather for all graph nodes ----
+    # ---- Pre-fetch weather for all graph nodes (use cached bbox if available) ----
     if not _wind_already_fetched:
-        winds = _fetch_hourly_winds(G, nodes, node_etas_map, date_str, use_hourly)
-        wind_map: Dict[Tuple[int, int], Tuple[float, float]] = {n[0]: w for n, w in zip(nodes, winds)}
+        if preload_ok:
+            winds = _weather_and_current_bbox(y, m,
+                [(d["lat"], d["lon"]) for _, d in nodes],
+                [node_etas_map.get(n[0], voyage_datetime) for n in nodes]
+            )
+            wind_map = {n[0]: (w[0], w[1]) for n, w in zip(nodes, winds)}
+        else:
+            winds = _fetch_hourly_winds(G, nodes, node_etas_map, date_str)
+            wind_map = {n[0]: w for n, w in zip(nodes, winds)}
 
     # ---- Pre-compute edge metadata dicts for fast lookup ----
     edge_bearings: Dict[Tuple[int, int], float] = {}

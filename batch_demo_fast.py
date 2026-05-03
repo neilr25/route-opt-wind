@@ -104,7 +104,8 @@ def _daterange(start: date, end: date):
 
 def main():
     print("=" * 60)
-    print("FAST DEMO BATCH: Jan 2025, 7 days, 5 routes")
+    print("FAST DEMO BATCH: Jan 2025, 7 days, 5 demo routes")
+    print("Demo ports: CHIBA, COPENHAGEN, LOOP TERMINAL, MELBOURNE, NOVOROSSIYSK, PORT RASHID")
     print("=" * 60)
 
     all_records = []
